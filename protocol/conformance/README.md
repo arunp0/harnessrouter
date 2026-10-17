@@ -34,26 +34,31 @@ check.
 | `--harness-id` | Run tasks against a specific harness instead of the first one listed. |
 | `--model` | Run tasks with a specific model. Required when the harness named by `--harness-id` has no default model: the suite says so and stops before the first task rather than waiting out the task timeout on each. |
 | `--task-timeout` | Seconds to allow one agent task. Default 300. |
-| `--only` | Comma-separated check ids, for iterating on one failure. |
+| `--plugin-mcp-url` | A reachable streamable-HTTP MCP server the plugin checks point a plugin at, or set `UHP_PLUGIN_MCP_URL`. Defaults to the public copy of the suite's own fixture (below). |
+| `--only` | Comma-separated check ids, for iterating on one failure. A subset is reported as a partial run, not a class conformance claim. |
 | `--json` | Write a machine-readable report. |
 | `--plain` | No ANSI colour, for CI logs. |
 
+`--only` keeps the exit-code convention for debugging: `0` means the selected checks did not
+fail or error. It does not certify the requested class. Use the JSON `conformant` and `coverage`
+fields, or the terminal summary, when deciding whether to publish a class claim.
+
 Exit code is `0` when nothing failed and `1` otherwise, so it drops into CI unchanged.
 
-**The suite runs real agent tasks.** It sends about six of them, which costs real model tokens and a
+**The suite runs real agent tasks.** It sends about seven of them, which costs real model tokens and a
 few minutes. That is deliberate: the defects worth catching — a stream that never flushes, a
 cancellation that never terminates, an artifact that cannot be downloaded — are invisible to
 anything that only inspects a schema.
 
 ## What it checks
 
-75 checks across three classes.
+76 checks across three classes.
 
 | Class | Checks | Covers |
 |---|---|---|
 | **Core** | 40 | Discovery, version negotiation, authentication, the error envelope, harnesses, models, task execution (streaming and not), the event stream, sessions, cancellation, reserved request fields |
 | **Extended** | +8 | Session listing and inspection, file input, artifacts, download headers, path-traversal probes |
-| **Full** | +25 | Harness create / update / delete, refusal of an unsupported base, skill-folder round trip, MCP and disabled-tool persistence, session sharing, plugins (package round trip, derivation, refusals, export) |
+| **Full** | +26 | Harness create / update / delete, refusal of an unsupported base, skill-folder round trip, MCP and disabled-tool persistence, session sharing, plugins (package round trip, derivation, refusals, export, and a tool call through a plugin's server) |
 
 Every check names the section of the specification it enforces, so a failure points at the sentence
 it violates rather than at a test name.
@@ -83,6 +88,11 @@ A few of them are worth calling out, because they catch things a schema check ne
   mistake that makes every read-then-write install them twice; P-06 fails an export that carries
   the operator's credentials, and one that omits them without saying so. Both series skip, never
   fail, on a server that reports the `plugins` capability false, because the chapter is optional.
+- **P-11** — the one plugin check that runs a task. It installs a plugin whose only server is the
+  fixture the run was pointed at, asks the agent to call the fixture's tool with a nonce, and
+  expects the fixture's answer back (a function of the nonce the agent cannot produce without
+  calling it). P-02 to P-10 read what the server derived and refused; only this one shows an
+  agent reaching a plugin's server at run time.
 - **T-08/T-09/T-10** — the reserved fields `tools` and `include` are accepted, and reported as
   ignored. Both halves matter: before these, the suite sent neither field, so a server that
   rejected them outright and a server that silently acted on them scored the same as a correct
@@ -107,6 +117,28 @@ A few of them are worth calling out, because they catch things a schema check ne
   `SKILL.md`, or that empties a bundle when the harness is renamed, passes every other check: the
   config still looks right, and the loss only shows up later as an agent behaving oddly.
 
+## The plugin fixture
+
+Every plugin check points a plugin at an MCP server, and a host is allowed to refuse a server it
+cannot reach at configuration time and record that in `skipped`. Until 2026.9.12.post3 that server
+was an unresolvable placeholder, so on such a host the checks measured the refusal instead of the
+plugin. The suite now ships the server it needs:
+
+```bash
+pip install "uhp-conformance[fixture]"
+uhp-conformance-fixture --host 0.0.0.0 --port 8080      # serves http://<host>:8080/mcp
+uhp-conformance --base-url https://your-uhp-server --api-key "$UHP_API_KEY" --class full \
+  --plugin-mcp-url https://fixture.example.com/mcp
+```
+
+It is a streamable-HTTP MCP server with two tools: `uhp_echo`, whose answer is a function of its
+input (the prefix `UHP-FIXTURE:` and the text reversed), which is how P-11 proves the agent called
+it; and `uhp_time`. A run defaults to a public copy of the same code at `https://uhp-fixture.harnessrouter.ai/mcp`
+(`DEFAULT_PLUGIN_MCP_URL` in the package; `fixture/Dockerfile` is how it is built), reachable from
+any host with outbound HTTPS.
+A host under test whose agents cannot reach the public internet needs a copy it can reach, and the
+address goes on `--plugin-mcp-url`.
+
 ## Outcomes
 
 | Outcome | Meaning |
@@ -123,11 +155,14 @@ lying about the thing it exists to establish.
 The JSON report holds itself to the same rule, because it is the artifact published as evidence
 for a conformance claim and its reader is frequently not the person who ran it:
 
-- `conformant` is `true` only when every check ran and none failed or errored. A single skip
-  makes it `false`.
-- `conformant_with_skips` is `true` when nothing failed or errored — the checks that ran are
-  clean, and the ones that didn't are enumerated in `skipped_not_verified` by id, so the report
-  says exactly what it did not establish.
+- `conformant` is `true` only when every check required by the requested class ran and passed.
+  A skipped or unselected check makes it `false`.
+- `conformant_with_skips` is `true` only when every required check ran and none failed or errored;
+  actual skips are enumerated in `skipped_not_verified`. A partial `--only` run sets this to
+  `false` because unselected checks were not attempted.
+- `coverage` reports whether all required checks ran, their counts, and the IDs that were not run
+  or appeared more than once. A partial run can pass every selected check while still making no
+  conformance claim. `highest_class_passed` credits only fully covered and passing classes.
 - `suite_version` and `generated_at` (UTC) tie the report to the suite revision and the moment
   that produced it. A report without these fields predates suite `2026.8.11.post1`; the
   checked-in reports from earlier runs are of that older shape.

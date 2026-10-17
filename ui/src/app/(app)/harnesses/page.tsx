@@ -16,14 +16,16 @@ import { HarnessLogo } from '@/components/HarnessLogo';
 import { CopyId } from '@/components/CopyId';
 import { ConfigChat, ShareModal, type ConvTotals } from '@/components/TaskChat';
 import { HarnessSettings } from '@/components/HarnessSettings';
-import { OOB, oobById, oobDefaultModel, oobModels, useModelCatalog, createCustom, listCustom, deleteSession,
+import { OOB, oobById, oobDefaultModel, oobModels, useModelCatalog, createCustom, listCustom, deleteSession, getHarnessPlugs,
          type CustomHarness } from '@/lib/harness';
+import { useConvState, usePaneState, setPaneState, getPaneState } from '@/lib/conversation';
 import { fetchHarnessRows, groupByHarness, timeAgo, p95Of, avgCreditsOf, RUNNING, TERMINAL_OK, TERMINAL_BAD,
          type HarnessRow, type TraceCard, fetchHarnessTasks, sortByActivity } from '@/lib/revamp-data';
 import { track } from '@/lib/analytics';
 import { getCurrentWorkspaceRef } from '@/lib/workspace';
 import { useEscape } from '@/lib/useEscape';
 import { getConvState, type UserMsg } from '@/lib/conversation';
+import { latencyText } from '@/lib/duration';
 
 type View = 'index' | 'chat' | 'settings';
 type TaskState = 'done' | 'running' | 'failed' | 'cancelled' | 'incomplete';
@@ -44,12 +46,6 @@ function taskState(status?: string): TaskState {
 /** A harness's loaded tasks: the pages read so far, the cursor for the next, and whether one is in flight. */
 interface TaskSlice { list: TraceCard[]; cursor: string; pages: number; loading: boolean }
 
-/** "4.2s" under a minute, "1m 12s" past it. */
-function fmtLatency(s: number): string {
-  if (s < 60) return `${s < 10 ? s.toFixed(1) : Math.round(s)}s`;
-  const m = Math.floor(s / 60);
-  return `${m}m ${Math.round(s - m * 60)}s`;
-}
 
 /** "Codex · gpt-5.4" for a row, from the same fields the old list read. */
 function runtimeOf(r: HarnessRow): { baseId: string; name: string; model: string } {
@@ -108,6 +104,22 @@ export default function HarnessesPage() {
   }, []);
   const [adding, setAdding] = useState(false);
   const [sharing, setSharing] = useState(false);
+  // The Browser control: there whenever this harness includes the browser plugin, its dot alive
+  // with the shown task's browser, opening the pane with or without a browser in it.
+  const [hasBrowser, setHasBrowser] = useState(false);
+  useEffect(() => {
+    let alive = true; setHasBrowser(false);
+    if (!h) return;
+    getHarnessPlugs(h).then((r) => { if (alive) setHasBrowser(!!r && r.enabled !== false && (r.plugs || []).includes('browser')); }).catch(() => {});
+    return () => { alive = false; };
+  }, [h]);
+  const taskBrowser = useConvState(sid || '').browser;
+  const pane = usePaneState(h);
+  const toggleBrowserPane = () => {
+    const open = !pane.open;
+    const dismissed = !open && sid && taskBrowser?.open ? { ...getPaneState(h).dismissed, [sid]: taskBrowser.epoch } : getPaneState(h).dismissed;
+    setPaneState(h, { open, dismissed, ...(open ? {} : { mode: 'docked' as const }) });
+  };
   const [totals, setTotals] = useState<ConvTotals | null>(null);
   // A task about to be deleted: its id, title, and harness, for the confirm and the refresh after.
   const [confirmDel, setConfirmDel] = useState<{ sid: string; title: string; hid: string } | null>(null);
@@ -315,7 +327,7 @@ export default function HarnessesPage() {
                     <span className="hx-badges" aria-label="Task totals">
                       {latency != null && (
                         <span className="hx-badge" title={`Total latency${latencyPartial ? `, from ${totals!.timed} of ${totals!.finished} turns` : ''}`}>
-                          <iconify-icon icon="tabler:clock"></iconify-icon>{latencyPartial ? '≥ ' : ''}{fmtLatency(latency)}
+                          <iconify-icon icon="tabler:clock"></iconify-icon>{latencyPartial ? '≥ ' : ''}{latencyText(latency)}
                         </span>
                       )}
                       {credits != null && (
@@ -329,6 +341,13 @@ export default function HarnessesPage() {
               </div>
             </div>
             <div className="hx-head-actions">
+              {view === 'chat' && h && hasBrowser && (
+                <button className={'hx-icbtn wbx-browser-hbtn' + (pane.open ? ' is-on' : '')} type="button" aria-pressed={pane.open}
+                  title={pane.open ? 'Hide the browser' : taskBrowser?.open ? 'Show the browser the agent is using' : 'Browser'} aria-label="Browser" onClick={toggleBrowserPane}>
+                  <iconify-icon icon="tabler:browser"></iconify-icon>
+                  <span className={'wbx-live-dot' + (taskBrowser?.open ? (taskBrowser.control === 'user' ? ' is-user' : ' is-on') : '')} aria-hidden="true" />
+                </button>
+              )}
               {view === 'chat' && sid && (
                 <button className="hx-icbtn" type="button" title="Share this task" aria-label="Share this task" onClick={() => setSharing(true)}>
                   <iconify-icon icon="tabler:share-2"></iconify-icon>

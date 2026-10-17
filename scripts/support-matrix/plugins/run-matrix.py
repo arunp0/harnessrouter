@@ -2,11 +2,15 @@
 """Prove the plugin path on every harness base, directly. No workflow, no fan out.
 
 For each base it creates a harness carrying the fixture package, runs one real task, checks the
-answer for the probe token, and deletes the harness. Two modes:
+answer for the probe token, and deletes the harness. Five modes:
 
   skills   the package carries only its Skill; every base must load it
   mcp      the package also declares a stdio MCP server; every base must call its tool (since
            #180/#182 every base takes a stdio server; pi's adapter and dsh's client spawn it)
+  rows     the same stdio server's second tool takes a list of free-form objects and answers its
+           token only when both rows arrive with their fields; otherwise it says what it received
+           (#394: some bases add an empty `properties` to the item's schema and some routes then
+           hand the tool [{}, {}]). Run it with --model on each connection that serves the model
   sse      the package declares an SSE server (a public probe); codex, dsh and goose reach it
            through the runner's bridge (#185), every other base natively
   http     the package declares a streamable-HTTP server (the same probe's /mcp end)
@@ -35,7 +39,17 @@ HERE = pathlib.Path(__file__).parent
 FIXTURE = HERE / "fixture"
 # Every base the catalog serves. Since #180/#182 every one of them takes a stdio server (pi's
 # adapter and dsh's client spawn it themselves), so no base is expected to refuse any column.
-BASES = ["claude-code", "codex", "hermes", "goose", "gemini", "qwen", "opencode", "cline", "omp", "pi", "dsh", "kimi", "muse", "aider", "openhands"]
+BASES = ["claude-code", "codex", "hermes", "goose", "gemini", "qwen", "opencode", "kilo", "cline",
+         "omp", "pi", "dsh", "kimi", "minimax", "grok", "muse", "aider", "openhands", "cheetahclaws",
+         "agentzero",
+         # 2026-10-02: mimo, jcode, opensquilla and nanobot. Every one of them takes a
+         # stdio server, two of them ONLY through the runner's bridge — jcode has no remote
+         # MCP client at all ("HTTP/SSE entries are recognized and skipped with a log line")
+         # and opensquilla takes stdio and SSE but not streamable HTTP, so both are in
+         # _BRIDGED_TRANSPORTS and a remote column measures the bridge on them.
+         "mimo", "jcode", "opensquilla", "nanobot",
+         # zeroclaw takes stdio, http and sse servers natively ([[mcp.servers]] `transport`)
+         "zeroclaw"]
 NO_STDIO: set[str] = set()
 # The public probe the remote columns call: its SSE end answers PROBE-SSE-<id>, its streamable-HTTP
 # end PROBE-HTTP-<id>. Both are the same fixed server, so a wrong answer is the base, not the probe.
@@ -52,12 +66,21 @@ MCP_PROMPT = ("Call the MCP tool plugin_probe from the server named probe (it ma
 REMOTE_PROMPT = ("Call the MCP tool {tool} from the server named probe (it may appear to you as {tool} "
                  "or probe_{tool}) with no arguments, then reply with the tool's output text verbatim and "
                  "nothing else. The tool must actually be called.")
-MODES = ["skills", "mcp", "sse", "http"]
+# A list of free-form objects through an MCP tool, read back: the argument shape a typed scenario
+# never sends. On 2026-10-05 the rows reached the tool empty on two bases with OpenAI models on one
+# aggregator, and with one model on every connection, while every other column was green. The
+# rows are spelled out in the prompt and the tool answers PLUGIN_ROWS_OK only if they arrived whole.
+ROWS_PROMPT = ("Call the MCP tool probe_rows from the server named probe (it may appear to you as probe_rows "
+               "or probe_probe_rows) with rows set to exactly this list of two objects: "
+               '[{"label": "first", "score": 1}, {"label": "second", "score": 2}]. Then reply with the '
+               "tool's output text verbatim and nothing else. The tool must actually be called.")
+MODES = ["skills", "mcp", "rows", "sse", "http"]
 # Per column: the server entry the package's mcp.json carries (None = no server), the tool the task
 # calls, and the token that proves the whole chain answered.
 COLUMN = {
     "skills": (None, None, "PLUGIN_SKILL_OK"),
     "mcp":    ("stdio", "plugin_probe", "PLUGIN_MCP_OK"),
+    "rows":   ("stdio", "probe_rows", "PLUGIN_ROWS_OK"),
     "sse":    ({"type": "sse", "url": f"{PROBE_URL}/sse"}, "probe_sse", f"PROBE-SSE-{PROBE_ID}"),
     "http":   ({"type": "streamable-http", "url": f"{PROBE_URL}/mcp"}, "probe_http", f"PROBE-HTTP-{PROBE_ID}"),
 }
@@ -130,14 +153,14 @@ def run_one(api: Api, base: str, mode: str, model: str, keep: bool, task_timeout
     status, created = api.call("POST", "/v1/harnesses", body)
     if status != 200:
         err = (created.get("error") or {})
-        if mode == "mcp" and base in NO_STDIO and err.get("code") == "unsupported_transport":
+        if COLUMN[mode][0] == "stdio" and base in NO_STDIO and err.get("code") == "unsupported_transport":
             row["outcome"] = "refused as designed"
             row["detail"] = f"422 {err.get('code')} detail={err.get('detail')}"
         else:
             row["outcome"] = "create failed"
             row["detail"] = f"HTTP {status} {err.get('code') or created}"
         return row
-    if mode == "mcp" and base in NO_STDIO:
+    if COLUMN[mode][0] == "stdio" and base in NO_STDIO:
         row["outcome"] = "should have been refused"
         row["detail"] = "the package declares a stdio server and this base cannot run one"
         api.call("DELETE", f"/v1/harnesses/{created['id']}")
@@ -150,13 +173,21 @@ def run_one(api: Api, base: str, mode: str, model: str, keep: bool, task_timeout
     try:
         _, tool, token = COLUMN[mode]
         prompt = (SKILL_PROMPT if mode == "skills" else MCP_PROMPT if mode == "mcp"
-                  else REMOTE_PROMPT.format(tool=tool))
+                  else ROWS_PROMPT if mode == "rows" else REMOTE_PROMPT.format(tool=tool))
         status, resp = api.call("POST", "/v1/responses", {
             "input": prompt, "metadata": {"harness_id": created["id"]}, "stream": False,
             "max_step": 12}, timeout=task_timeout)
         answer = text_of(resp) if status == 200 else ""
+        # With --model the row measures THAT model: a turn the gateway served with another one (a
+        # fallback, or the base's default) is not a pass for it, whatever the answer says.
+        meta = (resp.get("metadata") or {}) if isinstance(resp, dict) else {}
+        row["served"] = str(resp.get("model") or "") if isinstance(resp, dict) else ""
+        swapped = model and (row["served"] != model or meta.get("requested_model") or meta.get("model_fallback"))
         if status != 200:
             row["outcome"], row["detail"] = "task failed", f"HTTP {status} {str(resp)[:200]}"
+        elif swapped:
+            row["outcome"] = "other model"
+            row["detail"] = f"asked {model}, served {row['served']!r} {meta.get('requested_model') or ''}".strip()
         elif token in answer:
             row["outcome"] = "pass"
             row["detail"] = answer.strip().splitlines()[-1][:200]

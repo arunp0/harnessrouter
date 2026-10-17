@@ -216,16 +216,17 @@ def _agent_spec(job: dict) -> dict:
     # NO BASE URL IN IT EITHER. The spec is persisted with the conversation, and the base url is
     # the loopback relay's, which binds a fresh port on every runner start: a conversation created
     # before a restart dialled the old port on its next turn and died on `Cannot connect to host
-    # 127.0.0.1:39265` (hr-test, 2026-09-19, the first turn after a deploy). litellm reads
-    # OPENAI_BASE_URL from the environment when the spec carries none, and the driver sets it for
-    # this turn's server the way it sets the key, so every turn dials the relay it was given.
+    # 127.0.0.1:39265` (hr-test, 2026-09-19, the first turn after a deploy). litellm reads the
+    # base from the environment when the spec carries none (LITELLM_PROXY_API_BASE for the
+    # litellm_proxy/ id the builder sends), and the driver sets it for this turn's server the way
+    # it sets the key, so every turn dials the relay it was given.
     # RETRIES BOUNDED IN SECONDS, NOT MINUTES. The SDK's defaults (5 retries, 8 s minimum wait,
     # 64 s maximum, multiplier 8) turn a provider that answers the same 503 every time into a
     # 270-310 s turn before the reason is reported (three switch scenarios, hr-test 2026-09-19);
     # every other base surfaces the same refusal in seconds. Two retries a few seconds apart
     # still cover a blip. Persisted with the agent like the rest of the spec.
     spec: dict = {"llm": {"model": job["model"], "base_url": None, "usage_id": "harness",
-                          "num_retries": 2, "retry_min_wait": 2, "retry_max_wait": 8,
+                          "num_retries": 4, "retry_min_wait": 2, "retry_max_wait": 20,
                           "retry_multiplier": 2},
                   "tools": tools,
                   # THE AGENT DOC IS CONTEXT, NOT A FILE THE MODEL MAY OR MAY NOT OPEN. The SDK
@@ -287,8 +288,13 @@ _CONSOLE_NAMES = {v: k for k, v in _TOOL_NAMES.items()}
 def _action_input(action: dict) -> dict:
     """The action's arguments as the card's input: the SDK's `kind` and bookkeeping fields dropped,
     a terminal action's command under `command` as every other base's shell card carries it."""
-    return {k: v for k, v in action.items()
-            if k not in ("kind", "thought", "security_risk", "summary") and v not in (None, "", [], {})}
+    out = {k: v for k, v in action.items()
+           if k not in ("kind", "thought", "security_risk", "summary") and v not in (None, "", [], {})}
+    # An MCP tool action wraps the call's arguments in `data`; every other base's card shows the
+    # arguments themselves, so this one does too.
+    if set(out) <= {"data", "name"} and isinstance(out.get("data"), dict):
+        return dict(out["data"])
+    return out
 
 
 def _observation_text(obs: dict) -> str:
@@ -416,6 +422,15 @@ def _on_event(ev: dict, state: dict) -> None:
         # in; the SDK's registry names (terminal, file_editor, task_tracker) are the wire.
         name = str(ev.get("tool_name") or "Tool")
         action = ev.get("action") or {}
+        if not action:
+            # A call the SDK could not make (arguments that failed the tool's validation, a tool it
+            # does not have) carries no action; the card shows what the model sent instead, and
+            # the refusal arrives as this call's result. Arguments that were not JSON at all are
+            # replaced by the SDK with its own marker, which is not the model's and stays off.
+            with contextlib.suppress(Exception):
+                sent = json.loads(str((ev.get("tool_call") or {}).get("arguments") or ""))
+                if isinstance(sent, dict) and not sent.get("_openhands_malformed_tool_call"):
+                    action = sent
         card = _CONSOLE_NAMES.get(name, name)
         # the file editor's `view` is a read, not an edit: the console counts Edit cards as
         # files edited ("Edited 3 files" for one file created and two looked at)
@@ -431,7 +446,19 @@ def _on_event(ev: dict, state: dict) -> None:
         tuid = str(ev.get("tool_call_id") or state.get("last_call") or "t0")
         _emit("tool_result", {"id": tuid, "output": _observation_text(obs),
                               "is_error": bool(obs.get("is_error"))})
-    elif kind in ("AgentErrorEvent", "ConversationErrorEvent"):
+    elif kind == "AgentErrorEvent":
+        # THE ANSWER TO THE MODEL'S CALL, NOT THE TURN'S FAILURE. The SDK sends this to the model
+        # as the result of the call it made, under that call's id (arguments that failed the tool's
+        # validation, a tool it does not have, a tool that raised), and the model carries on.
+        # Reported as the turn's error, a turn the model recovered from was recorded failed:
+        # qwen3.7-plus gave task_tracker a status of 'pending', read the refusal, and made both
+        # files it was asked for (2026-10-09). So it is that call's result, as the model saw it,
+        # and it is kept as the reason should the conversation itself end in error.
+        text = str(ev.get("error") or ev.get("detail") or ev.get("message") or kind)
+        state["agent_error"] = text[:1500]
+        tuid = str(ev.get("tool_call_id") or state.get("last_call") or "t0")
+        _emit("tool_result", {"id": tuid, "output": text, "is_error": True})
+    elif kind == "ConversationErrorEvent":
         # A REAL failure. Recorded, not rendered: it is the turn's reason, not part of its answer.
         #
         # READ code AND detail. This event carries neither `error` nor `message` — its fields are
@@ -452,6 +479,31 @@ def _on_event(ev: dict, state: dict) -> None:
             value = ev.get("value")
             if isinstance(value, str) and value:
                 state["status"] = value.lower()
+
+
+_REASON_WAIT_S = 1.5
+
+
+def _read_the_reason(ws, state: dict) -> None:
+    """THE REASON COMES AFTER THE VERDICT. The SDK sets a failed status, which is published at once,
+    and only then publishes the ConversationErrorEvent saying why (MaxIterationsReached and
+    MaxBudgetReached, local_conversation 1.49.2). A loop that ends on the status never read the
+    reason, and the record said only "the agent-server marked the conversation error" while the
+    server's log said "Agent reached maximum iterations limit (8)" (gemini-3.8-flash, 2026-10-09).
+    So the socket is read on, briefly, until the reason arrives; a status with no reason to follow
+    (stuck) costs the wait and nothing else."""
+    end = time.time() + _REASON_WAIT_S
+    while time.time() < end and not state.get("reported_error"):
+        try:
+            raw = ws.recv(timeout=max(0.1, end - time.time()))
+        except Exception:  # noqa: BLE001 — a quiet or closed socket: there is no reason to read
+            return
+        try:
+            ev = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(ev, dict):
+            _on_event(ev, state)
 
 
 def _run_turn(base: str, ws_base: str, key: str, cid: str, prompt: str, state: dict,
@@ -496,6 +548,8 @@ def _run_turn(base: str, ws_base: str, key: str, cid: str, prompt: str, state: d
             if isinstance(ev, dict):
                 _on_event(ev, state)
                 if state.get("status") in _TERMINAL and state.get("sent"):
+                    if state["status"] in _FAILED and not state.get("reported_error"):
+                        _read_the_reason(ws, state)
                     return
                 # the run is only over once it has started: the status is `idle` until the first
                 # step lands, and returning on that would end the turn before it began
@@ -517,14 +571,18 @@ def main() -> int:
 
     env = dict(os.environ)
     env["OPENHANDS_AGENT_SERVER_CONFIG_PATH"] = str(cfg)
-    # THE PROVIDER CREDENTIAL, and the only place it lives (see _agent_spec). The id is sent with an
-    # `openai/` prefix by the builder so litellm routes through its openai provider verbatim instead
-    # of INFERRING one from the base url — the inference is what produced `Vercel_ai_gatewayException
-    # … set the VERCEL_AI_GATEWAY_API_KEY`, a provider-specific variable nothing here would set.
-    if job.get("api_key"):
-        env["OPENAI_API_KEY"] = str(job["api_key"])
-    if job.get("base_url"):
-        env["OPENAI_BASE_URL"] = str(job["base_url"])
+    # THE PROVIDER CREDENTIAL, and the only place it lives (see _agent_spec). The id is sent with a
+    # `litellm_proxy/` prefix by the builder so litellm routes through its proxy provider, which
+    # sends the rest of the id as it is (an `openai/` prefix was taken off twice on the way to the
+    # wire and an aggregator's openai/<id> reached TokenRouter bare), instead of INFERRING one from
+    # the base url — the inference is what produced `Vercel_ai_gatewayException … set the
+    # VERCEL_AI_GATEWAY_API_KEY`, a provider-specific variable nothing here would set. The proxy
+    # provider reads ITS OWN pair, on the chat path and the Responses path alike; the OpenAI pair
+    # is not read on the Responses path ("api_base not set for LiteLLM Proxy responses API").
+    # The pair is the route's: the proxy provider's for a litellm_proxy/ id, Anthropic's
+    # (ANTHROPIC_API_KEY, ANTHROPIC_API_BASE) for an anthropic/ id, as the builder sent it.
+    for k, v in (job.get("provider_env") or {}).items():
+        env[str(k)] = str(v)
     # The SDK prints a multi-line banner to STDOUT on import, which is this driver's NDJSON channel
     # for the server's own process; off by its own switch rather than by filtering lines.
     env["OPENHANDS_SUPPRESS_BANNER"] = "1"
@@ -614,9 +672,11 @@ def main() -> int:
         # The server's own verdict on the conversation is the reason, in its word: `stuck` is
         # the agent repeating itself past the server's detector, `error` a run that ended in one.
         # The log's exception line rides along when there is one; the shutdown noise never.
+        # Without one, the model's last refused call is the likeliest cause, so it is the reason.
         exc_line = tail_before_stop if _EXC_LINE.match((tail_before_stop or "").strip()) else ""
+        why = exc_line or state.get("agent_error") or ""
         _emit("error", {"text": f"the agent-server marked the conversation {status}"
-                                + (f": {exc_line}" if exc_line else "")})
+                                + (f": {why}" if why else "")})
         state["reported_error"] = True
     if not ok and not state.get("reported_error"):
         # A FAILED TURN CAN CARRY NO REASON AT ALL, and that is the server's design rather than a

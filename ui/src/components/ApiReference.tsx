@@ -121,6 +121,7 @@ ${addHdrs.map((h) => `  -H "${h}: <value>" \\\n`).join('')}  -d '{ "model": "${m
           <Param name="metadata" type="object">Up to 16 key/value string pairs attached to the response. <code>metadata.session_id</code> doubles as a continuation fallback (send it together with <code>previous_response_id</code>).</Param>
           <Param name="max_step" type="integer">Per-request override of the agent&apos;s step budget (harness default, else 400).</Param>
           <Param name="timeout_seconds" type="integer">Per-request override of the per-task wall-clock cap (harness default, else 1800).</Param>
+          <Param name="reasoning" type="object">How much the model thinks on this turn: <code>{'{"effort": "low"}'}</code>, one of <code>none</code>, <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>. Overrides the harness default. A model that lacks the level gets the nearest one it has, and the response&apos;s <code>reasoning</code> field says what was asked and what was applied. Unset leaves the model at its own default.</Param>
         </ParamTable>
         <div className="apidoc-sub">Response (200)</div>
         <CodeBlock lang="json" code={`{
@@ -296,10 +297,12 @@ curl "${mgmtBase}/sessions/{session_id}/files?changed=true" \\
           <Param name="mcp_servers" type="array">Tool connections: <code>{`{name, url, auth?, enabled}`}</code>. For <code>auth</code>, pass a secrets ref (below) or a <code>$headers.&#123;Name&#125;</code> per-request reference.</Param>
           <Param name="skills" type="array"><code>{`{name, files:[{path, content|content_b64}]}`}</code>, a bundle MUST include a <code>SKILL.md</code>; invalid bundles are rejected with 400. Skills can be whole folders: <code>path</code> is the file&apos;s relative path inside the skill (nested layouts like <code>guides/SKILL.md</code> install as-is); the root <code>SKILL.md</code> needs YAML frontmatter (<code>name</code>, <code>description</code>). Bundles over ~48&nbsp;KB are offloaded server-side and the saved agent returns that skill as <code>{`{name, enabled, blob}`}</code> with no <code>files</code>, normal; the folder still mounts into every run. On later updates pass such entries back unchanged; only include <code>files</code> when changing content.</Param>
           <Param name="plugins" type="array">Packages in the Agent Plugins format: <code>{`{files:[{path, content|content_b64}], enabled?}`}</code>, each with a <code>plugin.json</code> at its root, tools in <code>mcp.json</code>, Skills under <code>skills/</code>. The saved agent returns each as <code>{`{name, enabled, blob, manifest, mcpServers, skills, skipped}`}</code>; pass such entries back unchanged, and include <code>files</code> only for a new or changed package.</Param>
+          <Param name="environment" type="string">An environment id (<code>henv_…</code>): the project every run of this agent reads at its path, read-only, with its packages installed. See Environments below.</Param>
           <Param name="disabled_tools" type="array">Inherited/built-in tool names to disable.</Param>
           <Param name="additional_headers" type="array">Header NAMES your product passes per request for app-level auth (see Additional headers above).</Param>
           <Param name="max_step" type="integer">Default agent step budget (default 400).</Param>
           <Param name="timeout_seconds" type="integer">Default per-task wall-clock cap (default 1800).</Param>
+          <Param name="reasoning_effort" type="string">Default thinking level for this harness&apos;s tasks, one of the levels above. <code>GET /v1/bases</code> lists the levels each model has. Unset leaves each model at its own default.</Param>
         </ParamTable>
         <p className="hr-meta">Casing note: request bodies are snake_case (<code>default_model</code>,
           <code> mcp_servers</code>, <code>max_step</code>); responses come back camelCase
@@ -337,6 +340,56 @@ curl "${mgmtBase}/sessions/{session_id}/files?changed=true" \\
           format. Credentials are never included; each omission is listed in <code>skipped</code>.</p>
       </Endpoint>
 
+      <h3 className="apidoc-h3">Environments</h3>
+      <p className="hr-meta">A project and its installed dependencies, built once and read by every run that names it: mounted
+        read-only at <code>/env/&#123;slug&#125;</code> in the run&apos;s sandbox, beside the run&apos;s own writable
+        workspace, with its Python virtualenv and node_modules on <code>PATH</code>. Name it on an agent
+        (<code>environment</code> above) or on one run (<code>environment</code> in the task body). Two runs on
+        one environment share every byte of it and none of each other&apos;s workspace.</p>
+      <Endpoint method="POST" path="/v1/environments">
+        <p className="hr-meta">Create one. Returns it with its <code>id</code> and its <code>mount</code>, the path runs will see.</p>
+        <div className="apidoc-sub">Request body</div>
+        <ParamTable>
+          <Param name="name" type="string" req>Starts with a letter or digit; the path segment (<code>slug</code>) derives from it and does not change.</Param>
+          <Param name="description" type="string">What the project is.</Param>
+          <Param name="entry" type="string">How it is run, in your words (<code>python3 run.py --episode &lt;id&gt;</code>); repeated to the agent word for word.</Param>
+        </ParamTable>
+        <CodeBlock code={`curl -X POST $BASE/v1/environments -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \\
+  -d '{"name": "Content Studio", "entry": "python3 run.py --episode <id>"}'`} />
+      </Endpoint>
+      <Endpoint method="PUT" path="/v1/environments/{id}/files/{path}">
+        <p className="hr-meta">Write one file (the body is its bytes; its folders are made on the way).
+          <code> GET</code> reads it back, <code>DELETE</code> removes a file or a folder, <code>POST /v1/environments/&#123;id&#125;/directories</code>
+          with <code>{`{"path": "assets/brand"}`}</code> makes an empty folder, and <code>GET /v1/environments/&#123;id&#125;/files</code>
+          lists the tree. Editing changes nothing a run sees until the next build.</p>
+        <CodeBlock code={`curl -X PUT "$BASE/v1/environments/$ENV/files/scripts/render.py" -H "Authorization: Bearer $KEY" \\
+  --data-binary @scripts/render.py`} />
+      </Endpoint>
+      <Endpoint method="POST" path="/v1/environments/{id}/import">
+        <p className="hr-meta">A whole project at once, keeping its tree: a zip or tar as the body, or
+          <code> {`{"git": {"url": "...", "ref": "main"}}`}</code>. A single wrapping folder is stripped; links and paths
+          that escape the root are dropped; <code>?replace=1</code> clears the files first.</p>
+        <CodeBlock code={`curl -X POST "$BASE/v1/environments/$ENV/import?replace=1" -H "Authorization: Bearer $KEY" \\
+  -H "Content-Type: application/zip" --data-binary @content-studio.zip`} />
+      </Endpoint>
+      <Endpoint method="POST" path="/v1/environments/{id}/build">
+        <p className="hr-meta">Snapshot the files into the next version and install what they declare:
+          <code> requirements.txt</code> / <code>pyproject.toml</code> into a virtualenv, <code>package.json</code> with npm,
+          then <code>setup.sh</code>. Returns at once; poll <code>GET /v1/environments/&#123;id&#125;/builds/&#123;version&#125;</code>
+          for <code>building</code> → <code>ready</code> (with the packages and the log) or <code>failed</code> (with the reason).
+          A finished build becomes the version runs read; <code>POST …/versions/&#123;n&#125;/activate</code> rolls back to an
+          earlier one.</p>
+        <CodeBlock code={`curl -X POST $BASE/v1/environments/$ENV/build -H "Authorization: Bearer $KEY"
+curl $BASE/v1/environments/$ENV/builds/1 -H "Authorization: Bearer $KEY"`} />
+      </Endpoint>
+      <Endpoint method="POST" path="/v1/responses">
+        <p className="hr-meta">A run on an environment: the agent&apos;s harness names it, or the run does. A run on
+          an environment with nothing built is refused with <code>environment_not_ready</code> before it starts.</p>
+        <CodeBlock code={`curl -X POST $BASE/v1/responses -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \\
+  -d '{"input": "Render the teaser for episode 12 into my working directory.",
+       "metadata": {"harness_id": "chrn_..."}, "environment": "henv_..."}'`} />
+      </Endpoint>
+
       <Endpoint method="GET" path="/v1/models">
         <p className="hr-meta">The current model catalog per engine, each with its default. Build model
           pickers from this, don&apos;t hardcode model names. The map is keyed by <b>backend</b>, not
@@ -345,9 +398,9 @@ curl "${mgmtBase}/sessions/{session_id}/files?changed=true" \\
       </Endpoint>
 
       <Endpoint method="GET" path="/v1/harnesses/{id}/models">
-        <p className="hr-meta">The models this agent may run, its default, and the fallback. A run
-          requesting a model outside this set executes on the fallback, and the substitution is recorded
-          in <code>response.metadata</code> (<code>requested_model</code>, <code>model_fallback</code>).</p>
+        <p className="hr-meta">The models this agent may run and its default. A run requesting a model
+          outside this set is refused before it starts (<code>400 model_not_available</code>); nothing
+          runs on a model the caller did not ask for.</p>
       </Endpoint>
 
       {/* ── Rendering results ───────────────────────────────────────────── */}

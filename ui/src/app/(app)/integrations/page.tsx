@@ -18,6 +18,7 @@ import { SkelRows } from '@/components/Skel';
 import { getSession } from '@/lib/auth';
 import { authHeaders } from '@/lib/chat';
 import { PLATFORM_ADMIN_ORGS, SELF_HOSTED } from '@/lib/edition';
+import { OOB } from '@/lib/harness';
 
 interface ModelRow { canonical: string; provider_id: string }
 interface Integration {
@@ -40,14 +41,20 @@ interface ProviderMeta {
   secret: string;
   secret_label: string;
   key_hint?: string;
+  /** The provider can also be reached as an application in the organization's own Microsoft Entra
+   *  directory, in place of a key: the fields that asks for, and the name of its secret. */
+  entra?: { fields: ProviderField[]; secret: string; secret_label: string };
   models: ModelRow[];
   /** For the custom provider: every canonical id a harness can ask for, the choices of its rows. */
   canonicals?: string[];
+  format_backends?: Record<string, string[]>;
   backends: string[];
 }
 interface Doc {
   integrations: Integration[];
   model_map: Record<string, string>;
+  /** the hosted console, where a HarnessRouter API key's credit is bought and topped up */
+  hosted_console?: string;
   /** Images route separately from chat: the integration serving your chat models is usually not
    *  the one serving images, and an image model in a chat picker is a broken choice. */
   image_model_map?: Record<string, string>;
@@ -75,6 +82,13 @@ interface MediaCandidate {
 interface MediaChain { capability: string; unit: string; candidates: MediaCandidate[] }
 
 const SECRET = '__secret__';
+
+/** The bases' names as the console shows them everywhere else ("Claude Code", not the gateway's
+ *  `claude`), from its own list of bases; an id that list does not know is shown as it is. */
+function baseNames(backends: string[]): string[] {
+  const names = new Map(OOB.filter((h) => h.backend).map((h) => [h.backend as string, h.name]));
+  return [...new Set(backends.map((b) => names.get(b) || b))].sort((a, b) => a.localeCompare(b));
+}
 
 export default function IntegrationsPage() {
   const router = useRouter();
@@ -255,6 +269,8 @@ export default function IntegrationsPage() {
                             <span className={'itg-balance' + (i.balance.usd <= 0 ? ' out' : '')}>
                               {i.balance.usd <= 0 ? '$0.00 left, top up' : `$${i.balance.usd.toFixed(2)} left`}
                             </span>
+                            <a className="itg-balance-topup" href={`${doc?.hosted_console || 'https://app.harnessrouter.ai'}/billing`} target="_blank" rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}>Add credit ↗</a>
                           </div>
                         )}
                       </td>
@@ -339,6 +355,10 @@ export default function IntegrationsPage() {
                         <a className="itg-hosted-link" href="#get-key"
                           onClick={(e) => { e.preventDefault(); e.stopPropagation(); setEditing({ ...editing, provider: 'harnessrouter', config: editing.provider === 'harnessrouter' ? editing.config : {} }); void getKey(); }}>
                           Get a key ↗</a>
+                        {editing.provider === 'harnessrouter' && editingOriginal && (
+                          <a className="itg-hosted-link" href={`${doc?.hosted_console || 'https://app.harnessrouter.ai'}/billing`} target="_blank" rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}>Add credit ↗</a>
+                        )}
                       </span>
                       <span className="itg-hosted-accent">Every model at its listed price, no markup</span>
                       <span className="itg-hosted-muted">One universal key, every model on the list.</span>
@@ -362,13 +382,35 @@ export default function IntegrationsPage() {
                   const isCustom = editing.provider === 'custom';
                   // Only what varies by deployment. A provider with a known endpoint never
                   // shows a Base URL field — the server fills it in.
-                  const fields = [...meta.fields,
-                                  { key: meta.secret, label: meta.secret_label,
-                                    placeholder: meta.key_hint }];
+                  // A connection signs in with a key, or, where the provider offers it, as an
+                  // application in the organization's own Microsoft Entra directory.
+                  const entra = meta.entra && editing.config.auth === 'entra' ? meta.entra : null;
+                  const secretKey = entra ? entra.secret : meta.secret;
+                  const fields: ProviderField[] = entra
+                    ? [...meta.fields, ...entra.fields, { key: entra.secret, label: entra.secret_label }]
+                    : [...meta.fields,
+                       { key: meta.secret, label: meta.secret_label,
+                         placeholder: meta.key_hint }];
                   return (
                     <div className="field-stack">
+                      {meta.entra && (
+                        <div className="field">
+                          <label htmlFor="itg-auth">Sign in with</label>
+                          <select id="itg-auth" value={entra ? 'entra' : 'key'}
+                            onChange={(e) => setEditing({
+                              ...editing,
+                              config: { ...editing.config, auth: e.target.value === 'entra' ? 'entra' : '' },
+                            })}>
+                            <option value="key">API key</option>
+                            <option value="entra">Microsoft Entra</option>
+                          </select>
+                          {entra && (
+                            <span className="field-help">Tasks sign in to Microsoft Entra as this application. Give the application a role on your Azure resource.</span>
+                          )}
+                        </div>
+                      )}
                       {fields.map((f) => {
-                        const secret = f.key === meta.secret;
+                        const secret = f.key === secretKey;
                         const saved = secret && editing.config[f.key] === SECRET;
                         // Special rendering for custom provider fields
                         if (isCustom && f.key === 'api_format') {
@@ -386,13 +428,7 @@ export default function IntegrationsPage() {
                                 <option value="anthropic">Anthropic Messages</option>
                               </select>
                               <p className="field-help">
-                                {editing.config['api_format'] === 'anthropic'
-                                  ? 'Anthropic Messages format works with Claude Code, OpenCode, Pi, and DSH backends.'
-                                  : editing.config['api_format'] === 'responses'
-                                  ? 'OpenAI Responses format is what Codex speaks; only Codex can drive it. The endpoint gets /responses appended.'
-                                  : editing.config['api_format'] === 'openai'
-                                  ? 'OpenAI Chat Completions format works with Hermes, OpenCode, Pi, Qwen Code, Cline, Oh My Pi and DSH backends. Codex and Claude Code cannot drive a chat endpoint.'
-                                  : 'If you use Claude Code, choose Anthropic Messages format.'}
+                                Choose the API format your endpoint accepts. Compatible harness bases are listed below.
                               </p>
                             </div>
                           );
@@ -422,6 +458,42 @@ export default function IntegrationsPage() {
                                   {fullUrlOn ? 'On, the URL is used as it is' : `Off, ${editing.config['api_format'] === 'anthropic' ? '/v1/messages' : editing.config['api_format'] === 'responses' ? '/responses' : '/chat/completions'} is appended`}
                                 </span>
                               </div>
+                            </div>
+                          );
+                        }
+                        if (isCustom && (f.key === 'namespace_tools' || f.key === 'web_search')) {
+                          // Custom Responses endpoints default to function tools only. Keep these
+                          // Codex-specific capabilities explicit so an endpoint can opt in safely.
+                          if (editing.config['api_format'] !== 'responses') return null;
+                          const enabled = editing.config[f.key] === '1' || editing.config[f.key] === 'true';
+                          const label = f.key === 'namespace_tools' ? 'Enable Codex namespace tools' : 'Enable Codex web search';
+                          const help = f.key === 'namespace_tools'
+                            ? 'Off by default because many Responses endpoints accept function tools only.'
+                            : 'Off by default; enable only when this endpoint accepts Codex web search.';
+                          return (
+                            <div className="field" key={f.key}>
+                              <label>{label}</label>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                <button type="button" role="switch" aria-checked={enabled}
+                                  className="toggle-button"
+                                  onClick={() => setEditing({
+                                    ...editing,
+                                    config: { ...editing.config, [f.key]: enabled ? '' : '1' },
+                                  })}
+                                  style={{ minWidth: 44, minHeight: 26, padding: 0, borderRadius: 999,
+                                    border: enabled ? '1px solid var(--accent)' : '1px solid var(--line)',
+                                    background: enabled ? 'var(--accent)' : 'var(--surface-subtle)',
+                                    cursor: 'pointer', position: 'relative', transition: 'background .15s' }}>
+                                  <span style={{ display: 'block', width: 18, height: 18, borderRadius: 999,
+                                    background: enabled ? '#fff' : 'var(--line)',
+                                    position: 'absolute', top: 3, left: enabled ? 21 : 3,
+                                    transition: 'left .15s' }} />
+                                </button>
+                                <span style={{ fontSize: 13, color: enabled ? 'var(--ink)' : 'var(--muted)' }}>
+                                  {enabled ? 'On' : 'Off'}
+                                </span>
+                              </div>
+                              <p className="field-help">{help}</p>
                             </div>
                           );
                         }
@@ -471,15 +543,15 @@ export default function IntegrationsPage() {
                         <label>Models</label>
                         <p className="field-help">
                           The models this endpoint serves, and the name it wants for each one. Leave the
-                          name blank to send the model id as it is.
+                          name blank to send the model id as it is. Type any model id or choose a suggestion.
                         </p>
+                        <datalist id="custom-model-ids">
+                          {choices.map((c) => <option key={c} value={c} />)}
+                        </datalist>
                         {rows.map((r, idx) => (
                           <div className="itg-model-row" key={idx}>
-                            <select className="select" aria-label="Model" value={r.canonical}
-                              onChange={(e) => setRows(rows.map((x, i) => i === idx ? { ...x, canonical: e.target.value } : x))}>
-                              <option value="">Choose a model</option>
-                              {choices.map((c) => <option key={c} value={c}>{c}</option>)}
-                            </select>
+                            <input type="text" list="custom-model-ids" aria-label="Model" placeholder="Model id" value={r.canonical}
+                              onChange={(e) => setRows(rows.map((x, i) => i === idx ? { ...x, canonical: e.target.value } : x))} />
                             <input type="text" aria-label="Name on the wire" placeholder={r.canonical || 'same as the model id'}
                               value={r.provider_id === r.canonical ? '' : r.provider_id}
                               onChange={(e) => setRows(rows.map((x, i) => i === idx ? { ...x, provider_id: e.target.value } : x))} />
@@ -492,6 +564,12 @@ export default function IntegrationsPage() {
                         <button type="button" className="button" onClick={() => setRows([...rows, { canonical: '', provider_id: '' }])}>
                           <iconify-icon icon="tabler:plus"></iconify-icon>Add model
                         </button>
+                        <p className="field-help">
+                          {meta?.format_backends?.[editing.config.api_format]?.length
+                            ? `Compatible harness bases: ${baseNames(meta.format_backends[editing.config.api_format]).join(', ')}.`
+                            : 'Compatibility information is unavailable for this API format.'}
+                          {' '}If another connection serves the same model id, choose this connection under Model routing.
+                        </p>
                       </div>
                     );
                   }
@@ -507,6 +585,13 @@ export default function IntegrationsPage() {
                       </div>
                     );
                   }
+                  // A model this release does not list yet is one row away: the id a harness asks
+                  // for and the id the provider wants on the wire. The listed models stay the
+                  // product's; only the rows beyond the list are the operator's to edit.
+                  const table = new Set(models.map((m) => m.canonical));
+                  const extra = (editing.models || []).filter((m) => !table.has(m.canonical));
+                  const setExtra = (next: ModelRow[]) => setEditing({
+                    ...editing, models: [...(editing.models || []).filter((m) => table.has(m.canonical)), ...next] });
                   return (
                     <div className="field">
                       <label>Supported models</label>
@@ -522,6 +607,27 @@ export default function IntegrationsPage() {
                           {models.map((m) => <li key={m.canonical}>{m.canonical}</li>)}
                         </ul>
                       </details>
+                      <p className="field-help">
+                        A model newer than this release: add it with the id the provider uses on the wire,
+                        and it appears in every model picker this provider drives.
+                      </p>
+                      {extra.map((r, idx) => (
+                        <div className="itg-model-row" key={idx}>
+                          <input type="text" aria-label="Model id" placeholder="model id, as a harness asks for it"
+                            value={r.canonical}
+                            onChange={(e) => setExtra(extra.map((x, i) => i === idx ? { ...x, canonical: e.target.value } : x))} />
+                          <input type="text" aria-label="Name on the wire" placeholder={r.canonical || 'same as the model id'}
+                            value={r.provider_id === r.canonical ? '' : r.provider_id}
+                            onChange={(e) => setExtra(extra.map((x, i) => i === idx ? { ...x, provider_id: e.target.value } : x))} />
+                          <button type="button" className="button" aria-label="Remove model"
+                            onClick={() => setExtra(extra.filter((_, i) => i !== idx))}>
+                            <iconify-icon icon="tabler:x"></iconify-icon>
+                          </button>
+                        </div>
+                      ))}
+                      <button type="button" className="button" onClick={() => setExtra([...extra, { canonical: '', provider_id: '' }])}>
+                        <iconify-icon icon="tabler:plus"></iconify-icon>Add model
+                      </button>
                     </div>
                   );
                 })()}
@@ -536,7 +642,10 @@ export default function IntegrationsPage() {
                       [k, v === editingOriginal ? editing.name.trim() : v]));
                     if (await persist({
                       integrations: [...rest, { ...editing, name: editing.name.trim(),
-                        models: (editing.models || []).filter((m) => m.canonical.trim()) }],
+                        models: (editing.models || []).map((m) => ({
+                          ...m,
+                          canonical: m.canonical.trim() || (editing.provider === 'custom' ? m.provider_id.trim() : ''),
+                        })).filter((m) => m.canonical) }],
                       model_map: mm,
                     })) setEditing(null);
                   }}>{busy ? 'Saving…' : editingOriginal ? 'Save' : 'Create'}</button>

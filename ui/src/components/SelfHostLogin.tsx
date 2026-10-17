@@ -5,6 +5,7 @@
 // resets passwords by email and offers Google — every one of those needs a service this box does
 // not have. Reusing it would mean disabling four flows and explaining the remnants.
 import { useState } from 'react';
+import { safeNext } from '@/lib/safe-next';
 
 export function SelfHostLogin({ next }: { next: string }) {
   const [username, setUsername] = useState('');
@@ -27,7 +28,8 @@ export function SelfHostLogin({ next }: { next: string }) {
       }
       // A full navigation, not a client route change: the middleware has to see the new cookie,
       // and every page under it was rendered as unauthenticated.
-      window.location.assign(next || '/harnesses');
+      // Only a path on this site: `next` is whatever the link said (GHSA-59mq-hx4p-fw48).
+      window.location.assign(safeNext(next));
     } catch {
       setErr('Could not reach this instance.');
     } finally {
@@ -39,7 +41,7 @@ export function SelfHostLogin({ next }: { next: string }) {
     <div className="sh-login">
       <form className="sh-login-card" onSubmit={submit}>
         {/* eslint-disable-next-line @next/next/no-img-element -- static brand asset, no layout shift */}
-        <img className="sh-login-mark" src="/harnessrouter-wordmark.svg" alt="HarnessRouter" />
+        <img className="sh-login-mark" src="/brand/hr-horizontal-duo-light.png" alt="HarnessRouter" />
         <p className="sh-login-sub">Sign in to this instance.</p>
 
         {err ? <div className="notice error" role="alert">{err}</div> : null}

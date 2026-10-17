@@ -38,6 +38,11 @@ def test_session_uid_reads_the_directory_owner(tmp_path, monkeypatch):
     monkeypatch.setattr(server.os, "stat", lambda p, *a, **k: St() if str(p) == str(ws) else real_stat(p, *a, **k))
     assert server._session_uid(str(ws)) == fake
     assert server._as_session(str(ws)) == {"user": fake, "group": fake, "extra_groups": []}
+    # a turn that names an environment joins that environment's group, and only then
+    gid = server.environments.GID_BASE + 3
+    monkeypatch.setattr(server.environments, "reader_gid", lambda m: gid if m == "/env/studio" else None)
+    assert server._as_session(str(ws), {"HR_ENVIRONMENT": "/env/studio"}) == {"user": fake, "group": fake, "extra_groups": [gid]}
+    assert server._as_session(str(ws), {"PATH": "/usr/bin"}) == {"user": fake, "group": fake, "extra_groups": []}
 
 
 @pytest.mark.parametrize("name,stripped", [
@@ -107,7 +112,7 @@ def test_hermes_vision_auth_is_its_own_route(tmp_path, monkeypatch):
     import yaml
     env = {"HOME": str(tmp_path)}
     monkeypatch.setattr(server, "_hermes_relay_route",
-                        lambda base, key: ("http://127.0.0.1:1/v1", "hr-relay-placeholder"))
+                        lambda base, key, **kw: ("http://127.0.0.1:1/v1", "hr-relay-placeholder"))
     server._hermes_prepare_env("openai-api", server.Auth(api_key="k-chat", base_url="https://x/v1"),
                                str(tmp_path), env, model="qwen/qwen3.8-max",
                                vision_auth={"provider": "openai-api", "model": "gpt-5.4-mini",

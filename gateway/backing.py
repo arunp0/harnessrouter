@@ -34,6 +34,7 @@ import mimetypes
 import os
 import posixpath
 import re
+import shutil
 import sqlite3
 import tarfile
 import time
@@ -50,6 +51,9 @@ class GraphStore(Protocol):
     async def upsert(self, label: str, vid: str, props: dict, *, raise_on_fail: bool = False) -> None: ...
     async def add_edge(self, label: str, src: str, dst: str) -> None: ...
     async def find(self, label: str, eq: dict | None = None, neq: dict | None = None) -> list[dict]: ...
+    async def delete(self, vid: str, label: str | None = None) -> bool:
+        """Remove one vertex and its edges; False when there was none (or the label differs)."""
+        ...
     async def probe(self) -> None:
         """Raise if the store is unreachable/misconfigured. Used by /readyz, which must FAIL on a
         broken plane — the normal read paths swallow errors and return empty."""
@@ -66,6 +70,9 @@ class BlobStore(Protocol):
 
 class SecretStore(Protocol):
     async def get(self, tenant: str, name: str) -> str | None: ...
+    async def delete(self, tenant: str, name: str) -> None:
+        """Forget a stored secret; nothing happens when there is none."""
+        ...
 
     async def put(self, tenant: str, name: str, value: str, *,
                   require_encryption: bool = False) -> None:
@@ -163,6 +170,20 @@ class SqliteGraphStore:
         except Exception:  # noqa: BLE001 — best-effort, matches VG edge semantics
             pass
 
+    async def delete(self, vid: str, label: str | None = None) -> bool:
+        def _do():
+            with self._conn() as c:
+                row = c.execute("SELECT label FROM vertices WHERE vid=?", (vid,)).fetchone()
+                if not row or (label is not None and row[0] != label):
+                    return False
+                c.execute("DELETE FROM vertices WHERE vid=?", (vid,))
+                c.execute("DELETE FROM edges WHERE src=? OR dst=?", (vid, vid))
+                return True
+        try:
+            return await asyncio.to_thread(_do)
+        except Exception:  # noqa: BLE001
+            return False
+
     async def find(self, label: str, eq: dict | None = None, neq: dict | None = None) -> list[dict]:
         def _do():
             with self._conn() as c:
@@ -250,6 +271,28 @@ class FileBlobStore:
                     break
             return True
         return await asyncio.to_thread(_do)
+
+    async def purge(self, kb: str, prefix: str) -> None:
+        """Remove everything under a folder-shaped prefix ("sessions/<sid>/"), including the
+        temporary files a torn write leaves and `list` does not show. A deleted session's folder
+        held a lone `changed.json.tmp` after every listed object was gone (hr-test copy,
+        2026-10-08)."""
+        def _do():
+            base = (self._root / kb).resolve()
+            if not prefix.endswith("/") or prefix.strip("/") == "":
+                return
+            top = (base / prefix).resolve()
+            if top == base or base not in top.parents or not top.is_dir():
+                return
+            shutil.rmtree(top, ignore_errors=True)
+            for parent in top.parents:
+                if parent == base or base not in parent.parents:
+                    break
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+        await asyncio.to_thread(_do)
 
     async def list(self, kb: str, prefix: str, limit: int = 20, cursor: str | None = None) -> dict:
         # Walk only the subtree the prefix names: everything before its last "/" is a directory
@@ -381,6 +424,34 @@ class FileSecretStore:
             with contextlib.suppress(OSError):
                 p.chmod(0o600)              # belt to the encryption's braces
         await asyncio.to_thread(_do)
+
+    async def delete(self, tenant: str, name: str) -> None:
+        def _do():
+            with contextlib.suppress(OSError):
+                self._p(tenant, name).unlink()
+        await asyncio.to_thread(_do)
+
+    async def blank(self) -> list[tuple[str, str]]:
+        """Every stored secret whose value is empty, as (tenant, name). Before 0.32.0 a removed
+        credential was overwritten with nothing rather than deleted; the retention sweep removes
+        those files. A value that cannot be opened (encrypted, and no key) is not reported."""
+        def _do():
+            out: list[tuple[str, str]] = []
+            if not self._root.is_dir():
+                return out
+            for tdir in sorted(self._root.iterdir()):
+                if not tdir.is_dir():
+                    continue
+                for f in sorted(tdir.iterdir()):
+                    if not f.is_file():
+                        continue
+                    try:
+                        if self._open(f.read_text()) == "":
+                            out.append((tdir.name, f.name))
+                    except Exception:  # noqa: BLE001 — unreadable is not empty
+                        continue
+            return out
+        return await asyncio.to_thread(_do)
 
 
 # ── selection ─────────────────────────────────────────────────────────────────────

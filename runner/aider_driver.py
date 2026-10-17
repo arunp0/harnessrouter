@@ -98,6 +98,30 @@ def strip_edit_blocks(text: str) -> str:
     return _strip_shell_blocks(_EDIT_BLOCK.sub("", text or "")).strip()
 
 
+NO_ANSWER = "The model wrote only its reasoning; there was no answer this turn."
+
+
+def _after_answer_banner(display: str) -> str:
+    """The answer half of aider's display string, or the statement that the model wrote none.
+
+    This is the fallback when `partial_response_content` is empty, and `remove_reasoning_content`
+    cannot serve it: that helper looks for `<tag>`/`</tag>`, and `replace_reasoning_tags` has
+    already rewritten them into the `► **THINKING**` / `► **ANSWER**` furniture (reasoning_tags.py:8-11)
+    that the reader then saw as the answer. MEASURED on kimi-k3, about one aider turn in three
+    returned reasoning and no content at all (#395), so the furniture is what came back. Everything
+    after aider's own ANSWER banner IS the answer; when nothing follows, the model wrote none and
+    this says so rather than quoting the banner. A display string with no banner at all is some other
+    call site off the send path and still reports what it passed, as it did before this helper.
+    """
+    try:
+        from aider.reasoning_tags import REASONING_END
+    except Exception:
+        return display
+    if REASONING_END not in display:
+        return display
+    return display.split(REASONING_END)[-1].strip() or NO_ANSWER
+
+
 def is_text_file(path: str, sniff: int = 65536) -> bool:
     """Whether aider could read this file as text. aider adds a file the model names and reads it
     as UTF-8; a binary one (a .pptx the model was asked to restyle, 2026-09-19 on hr-test) fails
@@ -211,8 +235,10 @@ def _install(coder, gate: _Gate) -> None:
                                             coder.reasoning_tag_name)
         except Exception:
             body = ""
+        # An empty content field is the only case aider's decorated display string may be shown for;
+        # it goes through the banner's own marker rather than being handed over whole (#395).
         gate.error_after_output = False
-        _emit("text", {"text": strip_edit_blocks(body or str(message))})
+        _emit("text", {"text": strip_edit_blocks(body or _after_answer_banner(str(message)))})
         return orig_assistant(message, pretty)
 
     def tool_error(message="", strip=True):
@@ -272,6 +298,10 @@ def _install(coder, gate: _Gate) -> None:
     io.confirm_ask = confirm_ask
 
 
+REFLECT_ASK = ("Continue the task with this output. If more commands or edits are needed, propose "
+               "them now; otherwise write your answer for the user, stating what the output shows.")
+
+
 def _run_shell_commands_reporting(coder, gate: _Gate, reflect: bool = True):
     """Wrap Coder.run_shell_commands so each approved command's OUTPUT is reported too.
 
@@ -302,7 +332,11 @@ def _run_shell_commands_reporting(coder, gate: _Gate, reflect: bool = True):
             # it cannot report a token the script produced, and every other backend here can.
             # Setting the reflection gives aider the same in-turn loop, using aider's own mechanism
             # and its own max_reflections bound rather than a loop of ours.
-            coder.reflected_message = str(out)
+            # With an ask, as aider's own lint and test reflections carry one ("Fix any errors
+            # below"): the bare output reflected as the next message got "Ok" from gpt-5.4 after
+            # the browser column's tool calls, and the person's answer was the plan plus "Ok"
+            # (hosted, 2026-09-28).
+            coder.reflected_message = str(out).rstrip() + "\n\n" + REFLECT_ASK
         return out
 
     coder.run_shell_commands = wrapped
@@ -310,17 +344,22 @@ def _run_shell_commands_reporting(coder, gate: _Gate, reflect: bool = True):
 
 # A reply that announces work instead of doing it: "I'll create…", "Let me…", "Sure, I will…".
 # Anchored at the start, after an optional acknowledgement, so an answer that happens to contain
-# the words ("The file I'll need is…") is not one.
+# the words ("The file I'll need is…") is not one. The apostrophe is either kind: gpt-5.4 writes
+# "I’ll open the page in the browser" with the typographic one, and a match on the straight one
+# alone let that turn end with the plan and nothing done (hr-test 0.25.13, 2026-09-28).
 _ANNOUNCES = re.compile(
     r"^\s*(?:(?:ok(?:ay)?|sure|certainly|got it|understood|alright|right)[,.!:]?\s*)?"
-    r"(?:i(?:'ll| will| am going to|'m going to| can go ahead)|let me|first,? i(?:'ll| will)|"
-    r"here(?:'s| is) (?:the|my) plan)\b", re.I)
+    r"(?:i(?:['’]ll| will| am going to|['’]m going to| can go ahead| (?:still |also )?need to)|let me|"
+    r"first,? i(?:['’]ll| will)|here(?:['’]s| is) (?:the|my) plan)\b", re.I)
+# A reply that stops short and says so in a paragraph of its own: "To complete the task, I still
+# need to click the link" after the first browser output (gpt-5.4, hr-test 0.25.13, 2026-09-28).
+_STOPS_SHORT = re.compile(r"(?:^|\n)\s*to (?:complete|finish) (?:the|this) task,?\s*i (?:still |also )?need to\b", re.I)
 NUDGE = ("Nothing was run or edited. If the task needs files or commands, produce them now in "
          "this reply; otherwise give your final answer.")
 
 
 def _announces_without_acting(text: str) -> bool:
-    return bool(_ANNOUNCES.match(text or ""))
+    return bool(_ANNOUNCES.match(text or "") or _STOPS_SHORT.search(text or ""))
 
 
 def _run_turn(coder, prompt: str, gate: "_Gate | None" = None) -> None:

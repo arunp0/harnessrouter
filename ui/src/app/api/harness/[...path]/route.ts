@@ -21,7 +21,7 @@ import { LOCAL_MEMBER, LOCAL_ORG, SELF_HOSTED } from '@/lib/edition';
 import { AUTH_DISABLED, SESSION_COOKIE, sessionValid } from '@/lib/selfhost-auth';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 800; // long agent turns stream for minutes
+export const maxDuration = 3700; // a synchronous turn may run for the gateway's full hour; this hop must outlast it
 
 const GATEWAY =
   process.env.HARNESS_GATEWAY_URL ||
@@ -34,11 +34,21 @@ const INTERNAL_KEY = process.env.HARNESS_INTERNAL_KEY || '';
 // back 502 "harness-gateway unreachable" while the runner finished it (measured: 301.0 s and
 // 300.3 s on turns the session store shows completing at 340 s and 354 s), and a streamed turn
 // silent for five minutes inside one tool call would end the same way. The gateway's own hop to
-// the runner reads for an hour on purpose; this hop now allows what it declares.
+// the runner reads for an hour on purpose; this hop allows the same hour plus a margin. The 800 s
+// it allowed before cut every synchronous turn longer than 13.4 minutes with the same 502 while
+// the runner kept working and the caller held no id to poll (a customer benchmark, 2026-09-30).
+// A caller who would rather not hold a connection that long sends `background: true` and polls.
 const upstream = new Agent({ headersTimeout: maxDuration * 1000, bodyTimeout: maxDuration * 1000 });
 
 async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
   const { path } = await ctx.params;
+  // The gateway's /internal/* routes are for services that hold the internal key themselves. A
+  // browser has no business on them through a multi-tenant console, where this proxy attaches the
+  // key beside any bearer: they are not forwarded there at all. (A self-hosted box is its owner's:
+  // the signed-in operator may call them, and the gateway refuses any that arrives with a bearer.)
+  if (!SELF_HOSTED && (path || [])[0] === 'internal') {
+    return new Response(JSON.stringify({ detail: 'not found' }), { status: 404, headers: { 'content-type': 'application/json' } });
+  }
   const target = `${GATEWAY.replace(/\/$/, '')}/${(path || []).join('/')}${req.nextUrl.search}`;
   const headers: Record<string, string> = {};
   const ct = req.headers.get('content-type');
@@ -100,6 +110,7 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
     else init.body = await req.arrayBuffer();
   }
 
+  const started = Date.now();
   try {
     const res = await fetch(target, init);
     const ctType = res.headers.get('content-type') || 'application/json';
@@ -137,6 +148,10 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
     return new Response(res.body, { status: res.status, headers: out });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
+    // Said in the log, with the time it took: a connection that drops after thirteen minutes
+    // looks exactly like one that never opened, and nothing recorded the difference.
+    console.error(`harness proxy: ${req.method} /${(path || []).join('/')} failed after `
+      + `${((Date.now() - started) / 1000).toFixed(1)} s: ${msg}`);
     return new Response(JSON.stringify({ detail: `harness-gateway unreachable: ${msg}` }), {
       status: 502, headers: { 'content-type': 'application/json' },
     });

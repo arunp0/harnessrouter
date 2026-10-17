@@ -8,10 +8,10 @@ import { zipSync, strToU8 } from 'fflate';
 import { SkelPage } from '@/components/Skel';
 import { useRouter } from 'next/navigation';
 import {
-  OOB, oobById, oobDefaultModel, oobModels, useModelCatalog, modelAvailable, modelAvailability, availabilityNote, useBases, getCustom, saveCustom, deleteCustom, createCustom, getSkillFiles, storeMcpSecret, pluginSchemas,
+  OOB, oobById, oobDefaultModel, oobModels, useModelCatalog, modelAvailable, modelAvailability, availabilityNote, useBases, getCustom, saveCustom, deleteCustom, createCustom, getSkillFiles, storeMcpSecret, pluginSchemas, instructionFileLabel,
   type CustomHarness, type OobHarness, type HarnessPlugin, getPluginFiles,
   useRuntimeDefaults,
-  listPlugs, getHarnessPlugs, setHarnessPlugs, type Plug, type HarnessPlugs,
+  listPlugs, getHarnessPlugs, setHarnessPlugs, PLUGS_ENTRY_ID, type Plug, type HarnessPlugs,
 } from '@/lib/harness';
 import { HarnessLogo } from '@/components/HarnessLogo';
 import { CopyId } from '@/components/CopyId';
@@ -21,6 +21,7 @@ import { fetchTraceWindow, statsFor, p95Of, avgCreditsOf, timeAgo, type TraceCar
 // hosted workspace. Hidden and inert on hosted builds.
 import { SELF_HOSTED } from '@/lib/edition';
 import { CloudUploadDialog } from '@/components/CloudUploadDialog';
+import { listEnvironments, type Environment } from '@/lib/environments';
 import { statusOne, type CloudStatus } from '@/lib/cloud-upload';
 
 type Skill = CustomHarness['skills'][number];
@@ -28,6 +29,11 @@ const isOwnSkill = (s: Skill) => Boolean((s.files && s.files.length) || (s as { 
 
 /** Harness settings. `embedded`: rendered inside the Agent harnesses page, which owns the title
  *  row and the way back; navigation asks the host instead of pushing routes. */
+/** What each thinking level is called here. The levels themselves come from the server. */
+const THINKING_LABELS: Record<string, string> = {
+  none: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high',
+};
+
 export function HarnessSettings({ id, embedded = false, onNavigate }: {
   id: string; embedded?: boolean; onNavigate?: (to: 'tasks' | 'list') => void;
 }) {
@@ -39,6 +45,8 @@ export function HarnessSettings({ id, embedded = false, onNavigate }: {
   const oob = oobById(id);
   const [saved, setSaved] = useState<CustomHarness | null>(null);
   const [draft, setDraft] = useState<CustomHarness | null>(null);
+  const [environments, setEnvironments] = useState<Environment[] | null>(null);
+  useEffect(() => { listEnvironments().then(setEnvironments).catch(() => setEnvironments([])); }, []);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -86,6 +94,14 @@ export function HarnessSettings({ id, embedded = false, onNavigate }: {
     getHarnessPlugs(id).then((p) => { if (alive) setIncluded(p); }).catch(() => { if (alive) setIncluded(null); });
     return () => { alive = false; };
   }, [id, oob]);
+  // What the one list shows: the workspace's connected plugins (built-in harnesses take none) and
+  // the packages installed on this Harness; the count is the list's length.
+  const wsConnected = oob ? [] : (wsPlugs || []).filter((p) => p.status !== 'missing');
+  const pluginCount = wsConnected.length + (draft?.plugins || []).length;
+  // The plugins binding is an MCP entry on the record (the gateway's own plugs server), but it is
+  // the Plugins section's, not a custom server: the Tools section neither lists it (its address is
+  // ours, and its switch would be a second one) nor counts it.
+  const ownServers = (draft?.mcpServers || []).map((m, idx) => ({ m, idx })).filter(({ m }) => m.id !== PLUGS_ENTRY_ID);
   const togglePlug = async (type: string) => {
     if (!id) return;
     const have = included?.plugs || [];
@@ -189,6 +205,11 @@ export function HarnessSettings({ id, embedded = false, onNavigate }: {
   const srvBase = bases?.[base?.id || draft?.base || ''] || null;
   const baseTools = srvBase?.tools || [];
   const models = oobModels(base);
+  // The thinking levels of the model this Harness runs on, as the server lists them for it.
+  const thinkingModel = oob ? oobDefaultModel(oob) : (draft?.defaultModel || oobDefaultModel(oobById(draft?.base || '')) || '');
+  const thinkingLevels = bases?.[base?.id || '']?.models.find((m) => m.id === thinkingModel)?.reasoning || [];
+  const thinkingStored = draft?.reasoningEffort || '';
+  const thinkingKept = Boolean(thinkingStored) && !thinkingLevels.includes(thinkingStored);
   const upd = (p: Partial<CustomHarness>) => setDraft((d) => (d ? { ...d, ...p } : d));
 
   async function save() {
@@ -235,6 +256,9 @@ export function HarnessSettings({ id, embedded = false, onNavigate }: {
   // Built-ins the harness has not replaced with one of its own. A built-in is implicit: the
   // harness stores an entry only when its answer differs from the image's default.
   const takesSkills = srvBase?.takesSkills !== false;
+  // A base whose runtime is elsewhere (Qoder Cloud Agent) cannot open an environment: a Task that
+  // names one is refused, so none is offered, and one already chosen can only be cleared.
+  const takesEnvironments = srvBase?.takesEnvironments !== false;
   const baseSkills = (takesSkills ? (srvBase?.builtinSkills || []) : []).filter((b) => !ownSkills.some(({ s }) => s.name === b.name));
   const disabledTools = new Set(draft?.disabledTools || []);
 
@@ -308,13 +332,26 @@ export function HarnessSettings({ id, embedded = false, onNavigate }: {
                   ))}
                 </select>
                 <span className="field-help">Tasks may choose another compatible model at runtime.</span></div>
+              {!oob && (thinkingLevels.length > 0 || thinkingStored) && (
+                <div className="field"><label htmlFor="hsThinking">Thinking</label>
+                  <select id="hsThinking" disabled={readOnly} value={thinkingStored}
+                    onChange={(e) => upd({ reasoningEffort: e.target.value })}>
+                    <option value="">Model default</option>
+                    {(thinkingKept ? [...thinkingLevels, thinkingStored] : thinkingLevels).map((lv) => (
+                      <option key={lv} value={lv}>{THINKING_LABELS[lv] || lv}</option>
+                    ))}
+                  </select>
+                  <span className="field-help">{thinkingKept
+                    ? 'This model does not have that level. Its Tasks get the nearest one it has.'
+                    : 'How much the model thinks before it answers. A Task may set its own.'}</span></div>
+              )}
             </div>
           </section>
 
           <section className="form-section">
             <div><h3>Agent instructions</h3><p>Persistent role, conventions, constraints, and output contract loaded on every Task.</p></div>
             <div className="field-stack">
-              <div className="field"><label htmlFor="hsInstructions">{(base?.id || draft?.base || '') === 'systemone' ? 'Instructions' : ['codex', 'hermes', 'omp', 'pi', 'opencode', 'dsh', 'qwen', 'cline', 'goose', 'kimi', 'aider', 'openhands', 'muse'].includes(base?.id || draft?.base || '') ? 'AGENTS.md' : 'CLAUDE.md'}</label>
+              <div className="field"><label htmlFor="hsInstructions">{instructionFileLabel(base?.id || draft?.base || '')}</label>
                 <textarea id="hsInstructions" rows={7} disabled={readOnly}
                   value={oob ? oob.systemPrompt : (draft?.systemPrompt || '')}
                   onChange={(e) => upd({ systemPrompt: e.target.value })} />
@@ -325,7 +362,7 @@ export function HarnessSettings({ id, embedded = false, onNavigate }: {
           <section className="form-section">
             <div><h3>Tools</h3><p>Control inherited tools and add MCP servers for external capabilities.</p></div>
             <div className="field-stack">
-              <div className="section-actions"><strong>{baseTools.length + (draft?.mcpServers?.length || 0)} configured tools</strong>
+              <div className="section-actions"><strong>{baseTools.length + ownServers.length} configured tools</strong>
                 {!readOnly && <button className="button small" type="button" onClick={() => setMcpModal({ idx: null })}><iconify-icon icon="tabler:plus"></iconify-icon>Add MCP</button>}</div>
               <div className="capability-list">
                 {baseTools.map((t) => (
@@ -341,7 +378,7 @@ export function HarnessSettings({ id, embedded = false, onNavigate }: {
                     </div>
                   </div>
                 ))}
-                {(draft?.mcpServers || []).map((m, idx) => (
+                {ownServers.map(({ m, idx }) => (
                   <div key={m.id || idx} className="capability-row">
                     <span className="capability-icon"><iconify-icon icon="tabler:world-www"></iconify-icon></span>
                     <div className="capability-copy"><strong>{m.name}</strong><span>Custom MCP · {m.url || 'endpoint'}</span></div>
@@ -357,38 +394,6 @@ export function HarnessSettings({ id, embedded = false, onNavigate }: {
               </div>
             </div>
           </section>
-
-          {!oob && (
-          <section className="form-section">
-            <div><h3>Plugins</h3><p>Services this workspace connected. Include the ones this Harness needs; the agent gets their tools on every Task.</p></div>
-            <div className="field-stack">
-              {wsPlugs === null && <div className="capability-row"><span className="capability-icon"><iconify-icon icon="tabler:plug-connected"></iconify-icon></span><div className="capability-copy"><strong>Reading the workspace's plugins</strong></div></div>}
-              {wsPlugs && wsPlugs.filter((p) => p.status !== 'missing').length === 0 && (
-                <div className="capability-row"><span className="capability-icon"><iconify-icon icon="tabler:plug-connected"></iconify-icon></span>
-                  <div className="capability-copy"><strong>No plugins connected for this workspace yet</strong><span>Connect one on the Plugins page, then include it here.</span></div>
-                  <div className="capability-actions"><button className="button small" type="button" onClick={() => router.push('/plugins')}>Open Plugins</button></div>
-                </div>)}
-              {wsPlugs && wsPlugs.filter((p) => p.status !== 'missing').length > 0 && (
-                <div className="capability-list">
-                  {wsPlugs.filter((p) => p.status !== 'missing').map((p) => {
-                    const on = (included?.plugs || []).includes(p.type);
-                    return (
-                      <div key={p.type} className="capability-row">
-                        <span className="capability-icon"><iconify-icon icon={on ? 'tabler:circle-check' : 'tabler:circle-dashed'}></iconify-icon></span>
-                        <div className="capability-copy"><strong>{p.label}</strong>
-                          <span>{p.status === 'connected' ? `${p.tools} tools` : p.status === 'disabled' ? 'Turned off for the workspace' : 'Needs credentials on the Plugins page'}{p.pricing ? ` · $${p.pricing.usd_per_unit.toFixed(2)} per ${p.pricing.unit}` : ''}</span></div>
-                        <div className="capability-actions">
-                          <button className="toggle-button" type="button" disabled={readOnly || plugBusy === p.type} aria-pressed={on} onClick={() => void togglePlug(p.type)}>
-                            {on ? 'Included' : 'Not included'}</button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>)}
-              {plugErr && <span className="field-help" role="alert">{plugErr}</span>}
-            </div>
-          </section>
-          )}
 
           {!takesSkills ? (
           <section className="form-section">
@@ -473,9 +478,9 @@ export function HarnessSettings({ id, embedded = false, onNavigate }: {
           )}
 
           <section className="form-section">
-            <div><h3>Packages</h3><p>A package is a bundle of tools and Skills in the Agent Plugins format. What it brings joins this Harness's own tools and Skills on every Task.</p></div>
+            <div><h3>Plugins</h3><p>Tools and Skills this Harness carries beyond its own: the services this workspace connected, and the packages installed here in the Agent Plugins format. What they bring joins every Task.</p></div>
             <div className="field-stack">
-              <div className="section-actions plugin-head"><strong>{(draft?.plugins || []).length} installed {(draft?.plugins || []).length === 1 ? 'package' : 'packages'}</strong>
+              <div className="section-actions plugin-head"><strong>{pluginCount} {pluginCount === 1 ? 'plugin' : 'plugins'}</strong>
                 {!readOnly && <button className="button small" type="button" disabled={pluginBusy} onClick={() => pluginDirRef.current?.click()}>
                   <iconify-icon icon="tabler:plus"></iconify-icon>Install from folder</button>}
                 <input ref={pluginDirRef} type="file" hidden onChange={(e) => void installPluginFolder(e.target.files)}
@@ -483,6 +488,23 @@ export function HarnessSettings({ id, embedded = false, onNavigate }: {
               </div>
               {pluginNote && <div className={'plugin-note is-' + pluginNote.kind} role={pluginNote.kind === 'error' ? 'alert' : 'status'}>{pluginNote.text}</div>}
               <div className="capability-list plugin-list">
+                {!oob && wsPlugs === null && <div className="capability-row"><span className="capability-icon"><iconify-icon icon="lucide:plug"></iconify-icon></span><div className="capability-copy"><strong>Reading the workspace's plugins</strong></div></div>}
+                {!oob && wsConnected.map((p) => {
+                  const on = (included?.plugs || []).includes(p.type);
+                  return (
+                    <div key={'ws:' + p.type} className={'capability-row plugin-row' + (on ? '' : ' is-off')}>
+                      <span className="capability-icon"><iconify-icon icon="lucide:plug"></iconify-icon></span>
+                      <div className="capability-copy">
+                        <strong className="plugin-title">{p.label}{p.official && <span className="status neutral">Official</span>}</strong>
+                        <span className="plugin-facts">{p.status === 'connected' ? `${p.tools} ${p.tools === 1 ? 'tool' : 'tools'}` : p.status === 'disabled' ? 'Turned off for the workspace' : 'Needs credentials on the Plugins page'}{p.pricing ? ` \u00b7 $${p.pricing.usd_per_unit.toFixed(2)} per ${p.pricing.unit}` : ''}</span>
+                      </div>
+                      <div className="capability-actions">
+                        <button className="toggle-button" type="button" disabled={readOnly || plugBusy === p.type} aria-pressed={on} onClick={() => void togglePlug(p.type)}>
+                          {on ? 'Included' : 'Not included'}</button>
+                      </div>
+                    </div>
+                  );
+                })}
                 {(draft?.plugins || []).map((p, idx) => {
                   const servers = p.mcpServers || [], skls = p.skills || [], skipped = p.skipped || [];
                   const pending = Boolean(p.files && p.files.length && !p.blob);
@@ -530,16 +552,18 @@ export function HarnessSettings({ id, embedded = false, onNavigate }: {
                     </div>
                   );
                 })}
-                {(draft?.plugins || []).length === 0 && (
+                {pluginCount === 0 && (oob || wsPlugs !== null) && (
                   <div className="capability-row">
-                    <span className="capability-icon"><iconify-icon icon="tabler:puzzle"></iconify-icon></span>
-                    <div className="capability-copy"><strong>No plugins installed</strong>
+                    <span className="capability-icon"><iconify-icon icon="lucide:plug"></iconify-icon></span>
+                    <div className="capability-copy"><strong>No plugins yet</strong>
                       <span>{readOnly
-                        ? 'A built-in Harness carries no packages. Create a Harness of your own to install packages of tools and Skills.'
-                        : 'A package is a folder with a plugin.json at its root, tools in mcp.json and Skills under skills. Install one to add all of it at once.'}</span></div>
+                        ? 'A built-in Harness carries no plugins. Create a Harness of your own to include the services this workspace connects and install packages of tools and Skills.'
+                        : 'Connect a service on the Plugins page and include it here, or install a package: a folder with a plugin.json at its root, tools in mcp.json and Skills under skills.'}</span></div>
+                    {!readOnly && <div className="capability-actions"><button className="button small" type="button" onClick={() => router.push('/plugins')}>Open Plugins</button></div>}
                   </div>
                 )}
               </div>
+              {plugErr && <span className="field-help" role="alert">{plugErr}</span>}
             </div>
           </section>
 
@@ -584,7 +608,25 @@ export function HarnessSettings({ id, embedded = false, onNavigate }: {
           </section>
 
           <section className="form-section">
-            <div><h3>Environment</h3><p>Variables every Task's shell and tools start with. Put a secret behind a request header or a stored secret, never as a literal; the agent never sees the value in its prompt, and anything it prints is redacted from the record.</p></div>
+            <div><h3>Workspace</h3><p>Project files and packages every Task opens in.</p></div>
+            <div className="field-stack">
+              <div className="field"><label>Environment</label>
+                <select value={draft?.environment || ''} disabled={readOnly || environments === null || (!takesEnvironments && !draft?.environment)} onChange={(e) => upd({ environment: e.target.value })}>
+                  <option value="">None</option>
+                  {(takesEnvironments || draft?.environment) && (environments || []).map((en) => <option key={en.id} value={en.id}>{en.name}</option>)}
+                </select></div>
+              {!takesEnvironments && <span className="field-help">{base?.name || 'This base'} runs in its own cloud, so its Tasks cannot open an environment.{draft?.environment ? ' Choose None, or every Task on this Harness is refused.' : ''}</span>}
+              {takesEnvironments && draft?.environment && (() => { const en = (environments || []).find((x) => x.id === draft.environment); return en ? (
+                <span className="field-help">{en.status === 'ready'
+                  ? <>Every Task reads <code>{en.mount}</code> (version {en.version}) and its {en.packages.length} installed {en.packages.length === 1 ? 'package' : 'packages'}. <a href={`/environments/${en.id}`}>Open the environment</a>.</>
+                  : <>This environment has no built version yet, so Tasks on this Harness are refused until it is built. <a href={`/environments/${en.id}`}>Build it</a>.</>}</span>
+              ) : <span className="field-help">This environment is no longer there; choose another or none.</span>; })()}
+              {takesEnvironments && !draft?.environment && <span className="field-help">{environments && environments.length === 0 ? <>No environments yet. <a href="/environments">Create one</a> to give Tasks a ready project.</> : 'Tasks start from an empty workspace.'}</span>}
+            </div>
+          </section>
+
+          <section className="form-section">
+            <div><h3>Environment variables</h3><p>Variables every Task's shell and tools start with. Put a secret behind a request header or a stored secret, never as a literal; the agent never sees the value in its prompt, and anything it prints is redacted from the record.</p></div>
             <div className="field-stack">
               <div className="section-actions"><strong>{Object.keys(draft?.env || {}).length} variables</strong>
                 {!readOnly && <button className="button small" type="button" onClick={() => setEnvRows((r) => [...r, { name: '', value: '' }])}><iconify-icon icon="tabler:plus"></iconify-icon>Add variable</button>}</div>
@@ -653,7 +695,7 @@ export function HarnessSettings({ id, embedded = false, onNavigate }: {
         <CloudUploadDialog
           items={[{ id: draft.id, name: draft.name, uploaded: !!cloud?.uploaded,
                     includes: ['instructions', draft.defaultModel, (draft.skills || []).length ? `${draft.skills.length} skill${draft.skills.length === 1 ? '' : 's'}` : '',
-                               (draft.mcpServers || []).length ? `${draft.mcpServers.length} MCP server${draft.mcpServers.length === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ') }]}
+                               ownServers.length ? `${ownServers.length} MCP server${ownServers.length === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ') }]}
           onClose={() => setUploading(false)}
           onDone={() => { statusOne(draft.id).then(setCloud).catch(() => null); }} />
       )}

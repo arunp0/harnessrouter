@@ -17,17 +17,23 @@ Source anchors (all v1.50.0):
   get_or_create_session_id         crates/goose-cli/src/cli.rs
   skill discovery roots            crates/goose/src/skills/mod.rs
 """
+import json
+import os
 import pathlib
 import sqlite3
 import sys
 import tempfile
+import time
+import uuid
 
+import pytest
 import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from server import (Auth, ALL_GOOSE_TOOLS, BACKENDS, _agent_doc_path, _build_goose,  # noqa: E402
                     _goose_extensions, _goose_has_session, _goose_root, _goose_split_base,
-                    _goose_to_claude, _goose_usage, _norm_token_usage, _resume_lost,
+                    _goose_mcp_startup_failure, _goose_to_claude, _goose_usage,
+                    _norm_token_usage, _resume_lost, _run_turn_bg, _turns,
                     _GOOSE_SESSION_NAME)
 
 
@@ -239,6 +245,42 @@ def test_resume_only_once_the_session_is_in_this_workspace():
     assert "-r" in cmd2
 
 
+@pytest.mark.parametrize("provider,api_format,expected", [
+    ("anthropic", None, "anthropic"),
+    ("openai-api", "anthropic", "anthropic"),
+    ("openai-api", "openai", "openai"),
+    ("tokenrouter", None, "openai"),
+])
+@pytest.mark.parametrize("session", ["new", "resumed", "missing"])
+def test_turn_provider_overrides_the_saved_session(tmp_path, provider, api_format, expected, session):
+    """#375: Goose 1.50.0 prefers a saved provider to config.yaml on resume. The CLI
+    override must name this turn's wire provider, including for a custom Messages endpoint.
+    A new or lost session must use the same provider as a resumed one."""
+    cwd = str(tmp_path)
+    previous = "openai" if expected == "anthropic" else "anthropic"
+    if session == "resumed":
+        db_path = _sessions_db(cwd, ("existing-session", _GOOSE_SESSION_NAME))
+        with sqlite3.connect(db_path) as db:
+            db.execute("ALTER TABLE sessions ADD COLUMN provider_name TEXT")
+            db.execute("UPDATE sessions SET provider_name = ?", (previous,))
+    env = {}
+    cmd = _build_goose(provider, Auth(api_key="sk-test", base_url="https://up.example/v1",
+                                      api_format=api_format),
+                       "test-model", "continue", cwd, env,
+                       resume_session_id=_GOOSE_SESSION_NAME if session != "new" else None)
+    cfg = yaml.safe_load((_goose_root(cwd) / "config" / "config.yaml").read_text())
+    assert cfg["GOOSE_PROVIDER"] == expected
+    assert "--provider" in cmd, "config.yaml cannot override a resumed session's provider"
+    assert cmd[cmd.index("--provider") + 1] == expected
+    assert ("-r" in cmd) == (session == "resumed")
+    key = "ANTHROPIC_API_KEY" if expected == "anthropic" else "OPENAI_API_KEY"
+    assert env[key].startswith("hr-relay-")
+    if session == "resumed":
+        # The runner selects the provider through the CLI, without rewriting Goose's database.
+        with sqlite3.connect(db_path) as db:
+            assert db.execute("SELECT provider_name FROM sessions").fetchone() == (previous,)
+
+
 def test_session_lookup_asks_the_database():
     """THE check, and it must be exact in both directions.
 
@@ -443,6 +485,40 @@ def test_notifications_render_nothing():
     out, _ = _norm([{"type": "notification", "extension_id": "developer",
                      "log": {"message": "chatter"}}])
     assert out == []
+
+
+def test_real_goose_startup_warning_survives_successful_turn(tmp_path):
+    """Goose 1.50.0 logs this warning on stderr, then emits a successful stream-json turn.
+
+    The runner must surface the missing MCP tool even when the answer itself succeeded. Only
+    the extension name is exposed; subprocess stderr in the reason may contain credentials.
+    """
+    warning = "  ⚠ Failed to start extension 'broken-mcp' (process quit before initialization: stderr = secret-token), continuing without it"
+    another = "  ⚠ Failed to start extension 'other-mcp' (process quit before initialization: stderr = ), continuing without it"
+    assert _goose_mcp_startup_failure(warning) == "broken-mcp"
+    assert not _goose_mcp_startup_failure("ordinary CLI stderr")
+    script = tmp_path / "goose_stream.py"
+    script.write_text(
+        "import json,sys\n"
+        f"for line in {[warning, warning, another, 'unrelated stderr']!r}:\n"
+        "    sys.stderr.write(line + '\\n'); sys.stderr.flush()\n"
+        f"print(json.dumps({_msg({'type': 'text', 'text': 'hello'})!r}), flush=True)\n"
+        "print(json.dumps({'type':'complete','input_tokens':1,'output_tokens':1}), flush=True)\n"
+    )
+    turn_id = "goose-warning-" + uuid.uuid4().hex
+    _turns[turn_id] = {"events": [], "done": False, "started": time.time()}
+    try:
+        _run_turn_bg(turn_id, [sys.executable, str(script)], os.environ.copy(), str(tmp_path),
+                     _goose_to_claude, "gpt-test", timeout_seconds=10)
+        rec = _turns[turn_id]
+        warnings = [ev for ev in rec["events"] if ev.get("subtype") == "mcp_unavailable"]
+        assert rec["status"] == "done" and rec["result"] == "hello"
+        assert [ev["servers"] for ev in warnings] == [
+            [{"name": "broken-mcp"}], [{"name": "other-mcp"}]]
+        assert all(ev["type"] == "system" and isinstance(ev["_ts"], float) for ev in warnings)
+        assert "secret-token" not in json.dumps(rec["events"])
+    finally:
+        _turns.pop(turn_id, None)
 
 
 def test_complete_suppresses_the_eof_result():

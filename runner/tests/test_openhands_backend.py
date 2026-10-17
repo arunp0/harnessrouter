@@ -177,8 +177,27 @@ def test_the_relay_token_rides_the_turns_environment_so_the_served_model_and_usa
     cmd = _build_openhands("openai-api", Auth(api_key="sk-real", base_url="https://up.example/v1"),
                            "gpt-5.4", "hi", d, env)
     job = json.loads(cmd[-1])
-    assert env["OPENAI_API_KEY"].startswith("hr-relay-") and env["OPENAI_API_KEY"] == job["api_key"]
-    assert env["OPENAI_BASE_URL"] == job["base_url"]
+    assert env["LITELLM_PROXY_API_KEY"].startswith("hr-relay-") and env["LITELLM_PROXY_API_KEY"] == job["api_key"]
+    assert env["LITELLM_PROXY_API_BASE"] == job["base_url"]
+    # the pair litellm reads for a litellm_proxy/ id on both its paths; the OpenAI pair is read by
+    # nothing once the id carries that prefix (hr-test venv, 2026-09-27), so it is not set
+    assert "OPENAI_API_KEY" not in env and "OPENAI_BASE_URL" not in env
+
+
+def test_the_model_id_rides_the_litellm_proxy_prefix_so_a_vendor_slug_survives_to_the_wire():
+    """`openai/` was stripped twice between the job and the wire (OpenHands' LLM and litellm each
+    take one off), so an aggregator's openai/gpt-6-sol reached TokenRouter as the bare id and was
+    refused (503 model_not_found, the tokenrouter column of 2026-09-27). litellm's proxy prefix is
+    taken off once and the rest is sent as it is, measured in the openhands venv on hr-test."""
+    from server import Auth, _build_openhands
+    for pid in ("openai/gpt-6-sol", "gpt-6-sol", "anthropic/claude-sonnet-5"):
+        d = tempfile.mkdtemp(); env: dict = {}
+        cmd = _build_openhands("tokenrouter", Auth(api_key="sk-real", base_url="https://api.tokenrouter.com/v1"),
+                               pid, "hi", d, env)
+        job = json.loads(cmd[-1])
+        assert job["model"] == f"litellm_proxy/{pid}"
+        assert not job["model"].startswith("openai/")
+        assert env["LITELLM_PROXY_API_BASE"] == job["base_url"] and env["LITELLM_PROXY_API_KEY"] == job["api_key"]
 
 
 def test_only_the_execution_status_update_sets_the_status():
@@ -197,6 +216,102 @@ def test_an_error_event_is_recorded_not_rendered():
     out, _ = _collect({"kind": "ConversationErrorEvent", "code": "LLMServiceUnavailableError",
                        "detail": "Missing credentials"})
     assert [m for m, _ in out] == ["error"]
+
+
+def test_an_agent_error_is_the_calls_result_and_does_not_fail_the_turn():
+    """The SDK (1.49.2 _emit_tool_error) shows a call it could not make as an ActionEvent with no
+    action, then hands the model an AgentErrorEvent under the same call id, and the model carries
+    on. qwen3.7-plus gave task_tracker a status of 'pending', made both files it was asked for, and
+    the turn was recorded failed because this event was reported as the turn's error (2026-10-09)."""
+    from server import _openhands_to_claude
+    state: dict = {}
+    refused = "Error validating tool 'task_tracker': task_list.1.status Input should be 'todo'"
+    lines = []
+    for ev in ({"kind": "ActionEvent", "tool_call_id": "c1", "tool_name": "task_tracker", "action": None,
+                "tool_call": {"id": "c1", "name": "task_tracker",
+                              "arguments": json.dumps({"command": "plan", "task_list": [{"status": "pending"}]})}},
+               {"kind": "AgentErrorEvent", "tool_name": "task_tracker", "tool_call_id": "c1", "error": refused},
+               {"kind": "MessageEvent", "llm_message": {"role": "assistant", "content": [{"type": "text", "text": "Both files are made."}]}}):
+        out, state = _collect(ev, state)
+        lines += out
+    assert [m for m, _ in lines] == ["tool_call", "tool_result", "text"]
+    assert lines[1][1] == {"id": "c1", "output": refused, "is_error": True}
+    assert not state.get("reported_error") and state["agent_error"] == refused
+    runner: dict = {}
+    events = []
+    for m, p in lines + [("result", {"final": "Both files are made.", "ok": True, "status": "finished"})]:
+        events += _openhands_to_claude({"m": m, "p": p}, runner)
+    assert events[-1]["subtype"] == "success" and events[-1]["result"] == "Both files are made."
+    assert any(b.get("type") == "tool_result" and b.get("is_error") and b.get("tool_use_id") == "c1"
+               for e in events for b in (e.get("message") or {}).get("content") or [])
+
+
+def _turn_over(events: list, monkeypatch) -> tuple[list, dict]:
+    """_run_turn against a socket that delivers `events` in order, then stays quiet."""
+    import types
+
+    class _Socket:
+        def __init__(self):
+            self.queue = [json.dumps(e) for e in events]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def recv(self, timeout=None):
+            if self.queue:
+                return self.queue.pop(0)
+            raise TimeoutError
+
+    client = types.ModuleType("websockets.sync.client")
+    client.connect = lambda *a, **k: _Socket()
+    for name, mod in (("websockets", types.ModuleType("websockets")),
+                      ("websockets.sync", types.ModuleType("websockets.sync")),
+                      ("websockets.sync.client", client)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setattr(drv, "_req", lambda *a, **k: {})
+    out, state = [], {}
+    monkeypatch.setattr(drv, "_emit", lambda m, p: out.append((m, p)))
+    drv._run_turn("http://s", "ws://s", "k", "c1", "hi", state, max_seconds=5)
+    return out, state
+
+
+def test_a_failed_status_waits_for_the_reason_that_follows_it(monkeypatch):
+    """The SDK publishes the failed status first and the ConversationErrorEvent saying why second
+    (MaxIterationsReached). Ending on the status left the record with "the agent-server marked the
+    conversation error" while the server's log had the reason (gemini-3.8-flash, 2026-10-09)."""
+    out, state = _turn_over([
+        {"kind": "ConversationStateUpdateEvent", "key": "execution_status", "value": "running"},
+        {"kind": "ConversationStateUpdateEvent", "key": "execution_status", "value": "error"},
+        {"kind": "ConversationErrorEvent", "code": "MaxIterationsReached",
+         "detail": "Agent reached maximum iterations limit (8)."},
+    ], monkeypatch)
+    assert state["status"] == "error" and state.get("reported_error")
+    assert out == [("error", {"text": "MaxIterationsReached: Agent reached maximum iterations limit (8)."})]
+
+
+def test_a_finished_turn_ends_on_its_status(monkeypatch):
+    """Only a failed status has a reason to wait for; a finished turn does not read on."""
+    out, state = _turn_over([
+        {"kind": "ConversationStateUpdateEvent", "key": "execution_status", "value": "running"},
+        {"kind": "ConversationStateUpdateEvent", "key": "execution_status", "value": "finished"},
+        {"kind": "MessageEvent", "llm_message": {"role": "assistant", "content": [{"type": "text", "text": "late"}]}},
+    ], monkeypatch)
+    assert state["status"] == "finished" and out == []
+
+
+def test_a_call_the_sdk_could_not_make_shows_what_the_model_sent():
+    """Such a call carries no action, so its card showed no input at all. Arguments that were not
+    JSON are replaced by the SDK's own marker, which is not the model's and stays off the card."""
+    call, _ = _collect({"kind": "ActionEvent", "tool_call_id": "c2", "tool_name": "terminal", "action": None,
+                        "tool_call": {"id": "c2", "arguments": '{"command": "ls", "timeout": "soon"}'}}, {})
+    assert call[0][1]["name"] == "Shell" and call[0][1]["input"] == {"command": "ls", "timeout": "soon"}
+    call, _ = _collect({"kind": "ActionEvent", "tool_call_id": "c3", "tool_name": "terminal", "action": None,
+                        "tool_call": {"id": "c3", "arguments": json.dumps(
+                            {"_openhands_malformed_tool_call": True, "error": "Expecting value"})}}, {})
+    assert call[0][1]["input"] == {}
 
 
 def test_a_streaming_delta_is_not_rendered_twice():
@@ -435,7 +550,7 @@ def test_the_field_litellm_invents_for_a_known_claude_id_never_reaches_the_provi
     d = tempfile.mkdtemp(); env: dict = {}
     _build_openhands("openai-api", Auth(api_key="sk-real", base_url="https://api.anthropic.com"),
                      "claude-haiku-4-5-20251001", "hi", d, env)
-    route = _HERMES_RELAY["routes"][env["OPENAI_API_KEY"]]
+    route = _HERMES_RELAY["routes"][env["LITELLM_PROXY_API_KEY"]]
     assert route[2]["drop_fields"] == ("max_tokens",)
 
 
@@ -443,7 +558,11 @@ def test_provider_retries_are_bounded_in_seconds():
     """The SDK's defaults turned a provider that answered the same 503 every time into a 270 s
     turn before the reason was reported; every other base fails in seconds."""
     llm = drv._agent_spec({"model": "m"})["llm"]
-    assert (llm["num_retries"], llm["retry_min_wait"], llm["retry_max_wait"], llm["retry_multiplier"]) == (2, 2, 8, 2)
+    # four retries at 2, 4, 8 and 16 seconds: half a minute covers a provider that drops the
+    # connection mid-run (a 7.5-minute GPT-5.4 run died on one "Server disconnected" with the two
+    # retries of before, 2026-09-30), and a provider that is down is still reported in seconds,
+    # not the SDK's own 270
+    assert (llm["num_retries"], llm["retry_min_wait"], llm["retry_max_wait"], llm["retry_multiplier"]) == (4, 2, 20, 2)
 
 
 def test_the_agent_doc_is_loaded_as_context_on_every_turn():
@@ -474,3 +593,12 @@ def test_a_file_editor_view_is_a_read_card():
                         "action": {"kind": "FileEditorAction", "command": "create", "path": "/w/a.md", "file_text": "x"}}, {})
     assert call[0][1]["name"] == "Edit"
 
+
+
+
+def test_an_mcp_tool_actions_arguments_are_the_cards_input():
+    """An MCP tool action wraps the call's arguments in `data`; every other base's card shows the
+    arguments themselves (a benchmark's trace reader found {"data": {...}} on this base alone)."""
+    assert drv._action_input({"kind": "MCPToolAction", "name": "wm_find_documents", "data": {"query": "APL 26-018", "limit": 5},
+                              "thought": "", "security_risk": "LOW"}) == {"query": "APL 26-018", "limit": 5}
+    assert drv._action_input({"kind": "TerminalAction", "command": "ls", "is_input": False}) == {"command": "ls", "is_input": False}

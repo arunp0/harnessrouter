@@ -337,6 +337,12 @@ def test_a_reply_that_announces_work_and_does_none_is_nudged_once():
     the person types "go ahead". The nudge is that, once, only for a reply that reads as an
     announcement; a plain answer, a reply that acted, and a second announcement get none."""
     a = aider_driver._announces_without_acting
+    # the typographic apostrophe gpt-5.4 writes, a need stated instead of met, and a paragraph
+    # that says the task is not finished (three aider browser turns on hr-test 0.25.13, 2026-09-28)
+    assert a("I’ll open the page in the browser, click its only link, then report the destination URL.")
+    assert a("I need to use the browser for this, not edit any files.")
+    assert a("The browser output shows example.com loaded.\n\nTo complete the task, I still need to click the link.")
+    assert not a("Done. The page I’ll leave as it is; the file you need to edit is notes.csv.")
     assert a("I'll create a one-page PowerPoint deck about SFO and save it in the workspace.")
     assert a("Sure, I will build the deck now.") and a("Let me start by reading the skill.")
     assert a("Okay. I'm going to write the outline first.") and a("Here's the plan:\n1. read")
@@ -406,6 +412,8 @@ def test_shell_output_is_fed_back_so_the_model_sees_it_in_the_same_turn():
     aider_driver._run_shell_commands_reporting(c, g, reflect=True)
     c.run_shell_commands()
     assert c.reflected_message and "STAMP-OK" in c.reflected_message
+    # the output is followed by an ask, as aider's own reflections are, or the model answers "Ok"
+    assert c.reflected_message.endswith("\n\n" + aider_driver.REFLECT_ASK) and c.reflected_message.index("STAMP-OK") < c.reflected_message.index(aider_driver.REFLECT_ASK)
 
 
 def test_a_reflection_does_not_re_run_the_command_it_reported():
@@ -468,7 +476,7 @@ def _stub_mcp_sdk(monkeypatch):
     sh = types.ModuleType("mcp.client.streamable_http")
     sh.streamable_http_client = lambda url, http_client=None: ("http", url, http_client)
     hx = types.ModuleType("httpx2")
-    hx.AsyncClient = lambda headers=None: ("client", headers)
+    hx.AsyncClient = lambda headers=None, timeout=None: ("client", headers)
     client = types.ModuleType("mcp.client")
     pkg = types.ModuleType("mcp")
     pkg.client = client
@@ -798,6 +806,91 @@ def test_each_text_pass_ends_with_a_paragraph_break():
     assert ev["message"]["content"][0]["text"] == "First pass.\n\n"
 
 
+def _stub_reasoning_tags():
+    """aider's `reasoning_tags` as the suite sees it: the suite runs without aider installed, so
+    the two display markers and the strip helper stand in here. The markers are aider 0.86.2's own
+    literals (reasoning_tags.py:8-11), copied so a reworded banner upstream shows as a red test."""
+    import re as _re
+    pkg = types.ModuleType("aider")
+    mod = types.ModuleType("aider.reasoning_tags")
+    mod.REASONING_START = "--------------\n► **THINKING**"
+    mod.REASONING_END = "------------\n► **ANSWER**"
+    mod.remove_reasoning_content = lambda res, tag: (
+        _re.sub(f"<{tag}>.*?</{tag}>", "", res, flags=_re.DOTALL).strip() if tag else res)
+    pkg.reasoning_tags = mod
+    return {"aider": pkg, "aider.reasoning_tags": mod}
+
+
+def _turn_texts(display: str, content: str) -> list[str]:
+    """What the driver emits as the turn's text for one aider response."""
+    class _IO:
+        def assistant_output(self, message, pretty=None): pass
+        def confirm_ask(self, *a, **k): return True
+        def tool_error(self, *a, **k): pass
+        def tool_warning(self, *a, **k): pass
+
+    coder = types.SimpleNamespace(io=_IO(), partial_response_content=content,
+                                  reasoning_tag_name="thinking-content-7bbeb8e1441453ad999a0bbba8a46d4b",
+                                  shell_commands=[])
+    stub = _stub_reasoning_tags()
+    emitted: list = []
+    real_emit = aider_driver._emit
+    saved = {k: sys.modules.get(k) for k in stub}
+    sys.modules.update(stub)
+    try:
+        aider_driver._emit = lambda m, p: emitted.append((m, p))
+        aider_driver._install(coder, aider_driver._Gate([]))
+        coder.io.assistant_output(display)
+    finally:
+        aider_driver._emit = real_emit
+        for k, v in saved.items():
+            sys.modules.pop(k, None) if v is None else sys.modules.__setitem__(k, v)
+    return [p["text"] for m, p in emitted if m == "text"]
+
+
+def test_a_reply_of_reasoning_only_says_the_model_wrote_no_answer():
+    """MEASURED FAILURE this pins (self-hosted, kimi-k3, 2026-10-05, #395): about one aider turn in
+    three the model returned reasoning and no content, the turn completed, and the answer the reader
+    got was aider's own display furniture — `--------------\\n► **THINKING**` and the chain of
+    thought — because an empty `partial_response_content` falls back to the display string, and
+    `remove_reasoning_content` only recognises the `<tag>` form the display string no longer holds."""
+    furniture = (_stub_reasoning_tags()["aider.reasoning_tags"].REASONING_START
+                 + "\n\nThe user wants me to call the MCP tool `probe_rows`. Let me first check"
+                   " the tools available on the probe server.\n\n"
+                 + _stub_reasoning_tags()["aider.reasoning_tags"].REASONING_END + "\n\n")
+    texts = _turn_texts(furniture, "")
+    assert texts == [aider_driver.NO_ANSWER], texts
+    assert "THINKING" not in texts[0] and "►" not in texts[0]
+    # what the gateway stores is the result's text; the normaliser takes the last text pass when
+    # the driver's own `final` is empty, so the banner reached the record through that door too
+    state: dict = {"_aider_init": True}
+    _aider_to_claude({"m": "text", "p": {"text": texts[0]}}, state)
+    ev = _aider_to_claude({"m": "result", "p": {"ok": True, "final": ""}}, state)[0]
+    assert ev["is_error"] is False and ev["result"] == aider_driver.NO_ANSWER
+
+
+def test_the_answer_behind_the_banner_is_what_the_reader_gets():
+    """The other half of the same fallback: a content field that is empty does not mean the display
+    string holds nothing but reasoning — what follows aider's ANSWER marker is the answer."""
+    stub = _stub_reasoning_tags()["aider.reasoning_tags"]
+    display = (stub.REASONING_START + "\n\nthink think think\n\n" + stub.REASONING_END
+               + "\n\nA one-pager is in sfo.pdf.\n")
+    assert _turn_texts(display, "") == ["A one-pager is in sfo.pdf."]
+
+
+def test_a_display_string_with_no_furniture_is_reported_as_it_arrived():
+    """The fallback exists for a call site off the send path, which passes plain prose; stripping
+    to nothing there would answer the reader with silence (the invariant in `_install`'s comment)."""
+    assert _turn_texts("I restyled the deck.", "") == ["I restyled the deck."]
+
+
+def test_the_driver_takes_aiders_own_banner():
+    """Handing the marker to the helper is the point: a pattern of ours would drift from aider's."""
+    src = pathlib.Path(__file__).resolve().parents[1].joinpath("aider_driver.py").read_text()
+    assert "from aider.reasoning_tags import REASONING_END" in src
+    assert "body or _after_answer_banner(str(message))" in src
+
+
 def test_the_models_reasoning_is_not_rendered_as_its_answer():
     """MEASURED FAILURE this pins (vercel|aider|grok-4.20, 2026-09-18): the transcript showed the
     model's chain of thought -- "(wait, no, that's not how it works)... So my response should be:"
@@ -820,17 +913,13 @@ def test_the_models_reasoning_is_not_rendered_as_its_answer():
     coder = _Coder()
     emitted = []
     real_emit = aider_driver._emit
-    aider_driver._emit = lambda m, p: emitted.append((m, p))
     # the driver asks aider to strip, so aider is where the tag semantics stay; the suite runs
     # without aider installed, so its helper stands in here
-    import re as _re
-    pkg = types.ModuleType("aider"); mod = types.ModuleType("aider.reasoning_tags")
-    mod.remove_reasoning_content = lambda res, tag: (
-        _re.sub(f"<{tag}>.*?</{tag}>", "", res, flags=_re.DOTALL).strip() if tag else res)
-    pkg.reasoning_tags = mod
-    saved = {k: sys.modules.get(k) for k in ("aider", "aider.reasoning_tags")}
-    sys.modules.update({"aider": pkg, "aider.reasoning_tags": mod})
+    stub = _stub_reasoning_tags()
+    saved = {k: sys.modules.get(k) for k in stub}
+    sys.modules.update(stub)
     try:
+        aider_driver._emit = lambda m, p: emitted.append((m, p))
         aider_driver._install(coder, aider_driver._Gate([]))
         # what aider would hand it for a reasoning model
         coder.io.assistant_output(

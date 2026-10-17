@@ -5,6 +5,7 @@ import { GoogleButton, GOOGLE_ENABLED } from '@/components/GoogleButton';
 import { stashInvite, takePendingInvite } from '@/app/(app)/billing/lib';
 import { SELF_HOSTED } from '@/lib/edition';
 import { SelfHostLogin } from '@/components/SelfHostLogin';
+import { safeNext } from '@/lib/safe-next';
 
 // HarnessRouter is a subscribable product over AgentStudio orgs. The sign-in org picker lists ONLY
 // orgs that subscribed to HR (hr_subscribed flag). The account itself is the shared AgentStudio user.
@@ -17,7 +18,7 @@ export default function LoginPage() {
   // and offers Google — all of which need services a single box doesn't have.
   if (SELF_HOSTED) {
     const next = typeof window !== 'undefined'
-      ? new URLSearchParams(window.location.search).get('next') || ''
+      ? safeNext(new URLSearchParams(window.location.search).get('next'))
       : '';
     return <SelfHostLogin next={next} />;
   }
@@ -121,7 +122,7 @@ function HostedLoginPage() {
     <div className="hr-auth">
       <div className="hr-auth-card">
         {/* eslint-disable-next-line @next/next/no-img-element -- static brand asset */}
-        <a className="hr-brand" href="https://harnessrouter.ai"><img className="hr-brand-logo" src="/harnessrouter-wordmark.png" alt="HarnessRouter" /></a>
+        <a className="hr-brand" href="https://harnessrouter.ai"><img className="hr-brand-logo" src="/brand/hr-horizontal-duo-light.png" alt="HarnessRouter" /></a>
         {verifyEmailAddr ? (
           <>
             <h1 style={{ marginTop: 14 }}>Check your email</h1>

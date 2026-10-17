@@ -28,7 +28,8 @@ def test_only_the_meta_connection_drives_muse():
     wired = {integ for (integ, backend) in gw._INTEGRATION_WIRING if backend == "muse"}
     assert wired == {"meta"}, "no aggregator serves Meta's /muse-code/models, so none can run the CLI"
     assert gw._INTEGRATION_WIRING[("meta", "muse")] == "meta"
-    assert not gw._custom_can_drive("muse"), "a custom endpoint has no Muse Code catalog either"
+    assert not any("muse" in bs for bs in gw._CUSTOM_FORMAT_BACKENDS.values()), \
+        "a custom endpoint has no Muse Code catalog either"
 
 
 def test_the_catalog_defaults_to_the_standard_id_and_offers_the_discount_beside_it():

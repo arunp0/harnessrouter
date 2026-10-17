@@ -109,7 +109,8 @@ class Vendor:
                 assert body["gitSource"] == {"type": "github", "repoId": 42, "ref": "main"}
                 return httpx.Response(200, json={"id": "dpl_1", "url": "site-abc.vercel.app", "readyState": "QUEUED"})
             if path == "/v13/deployments/dpl_1":
-                return httpx.Response(200, json={"id": "dpl_1", "url": "site-abc.vercel.app", "readyState": "READY", "target": "production"})
+                return httpx.Response(200, json={"id": "dpl_1", "url": "site-abc.vercel.app", "readyState": "READY",
+                                                 "target": getattr(self, "target", "production")})
             return httpx.Response(404, json={"error": {"message": f"no mock for {path}"}})
         if host == "acme.insforge.app":
             assert r.headers.get("Authorization") == f"Bearer {INF_KEY}"
@@ -120,6 +121,11 @@ class Vendor:
                 return httpx.Response(201, json=json.loads(r.content))
             if path == "/api/health":
                 return httpx.Response(200, json={"status": "ok"})
+            if path == "/api/database/tables/orders/schema" and r.method == "GET":
+                return httpx.Response(200, json={"tableName": "orders", "columns": [{"columnName": "status", "type": "string"}]})
+            if path.startswith("/api/database/tables/") and r.method == "GET":
+                # what the real backend answers on a path it does not route: its not-found page
+                return httpx.Response(404, text="<!DOCTYPE html>\n<html lang=\"en\"><head><title>Not found</title></head></html>")
             return httpx.Response(404, text=f"no mock for {path}")
         return httpx.Response(500, text=f"unexpected host {host}")
 
@@ -135,7 +141,6 @@ def world(monkeypatch):
     reg, ven, posted = Registry(), Vendor(), []
     rc = httpx.AsyncClient(transport=httpx.MockTransport(reg.handle))
     monkeypatch.setattr(gw, "PLUGS_REGISTRY_URL", "https://registry.example")
-    monkeypatch.setattr(gw, "_PLUGS_ORGS", {ORG})
     monkeypatch.setattr(gw, "_client", lambda: rc)
     monkeypatch.setattr(plugs_plane, "transport", httpx.MockTransport(ven.handle))
     monkeypatch.setattr(plugs_plane, "DEPLOY_POLL_S", 0)
@@ -229,11 +234,6 @@ def test_attach_refusals(client, world, monkeypatch):
     bare = _harness(client, {"x-harness-workspace": ""})
     r = _post(client, f"/v1/harnesses/{bare}/servers/plugs", {"plugs": ["github"]})
     assert r.status_code == 400 and r.json()["error"]["code"] == "workspace_required"
-    # while the feature is held, an org not on the list gets nothing
-    monkeypatch.setattr(gw, "_PLUGS_ORGS", set())
-    r = _post(client, f"/v1/harnesses/{hid}/servers/plugs", {"plugs": ["github"]})
-    assert r.status_code == 404 and r.json()["error"]["code"] == "plugs_unavailable"
-    monkeypatch.setattr(gw, "_PLUGS_ORGS", {"*"})
     assert _post(client, f"/v1/harnesses/{hid}/servers/plugs", {"plugs": ["github"]}).status_code == 200
 
 
@@ -248,13 +248,13 @@ def test_the_agent_lists_and_calls_the_bound_plugs(client, world):
 
     assert _rpc(client, tok, "initialize")["serverInfo"]["name"] == "plugs"
     names = [t["name"] for t in _rpc(client, tok, "tools/list")["tools"]]
-    assert "github.get_file_contents" in names and "github.merge_pull_request" in names
-    assert [n for n in names if n.startswith("insforge.")] == ["insforge.query_rows"]      # narrowed
-    assert not [n for n in names if n.startswith("vercel.")]                                # not bound
-    listed = next(t for t in _rpc(client, tok, "tools/list")["tools"] if t["name"] == "github.merge_pull_request")
+    assert "github_get_file_contents" in names and "github_merge_pull_request" in names
+    assert [n for n in names if n.startswith("insforge_")] == ["insforge_query_rows"]      # narrowed
+    assert not [n for n in names if n.startswith("vercel_")]                                # not bound
+    listed = next(t for t in _rpc(client, tok, "tools/list")["tools"] if t["name"] == "github_merge_pull_request")
     assert listed["annotations"] == {"readOnlyHint": False, "destructiveHint": True}
 
-    out = _rpc(client, tok, "tools/call", {"name": "github.get_file_contents", "arguments": {"path": "README.md"}})
+    out = _rpc(client, tok, "tools/call", {"name": "github_get_file_contents", "arguments": {"path": "README.md"}})
     assert out["isError"] is False, out
     assert json.loads(out["content"][0]["text"]) == {"path": "README.md", "sha": "abc", "size": 5, "content": "hello"}
     assert ven.calls[-1].url.path == "/repos/acme/site/contents/README.md"
@@ -263,12 +263,12 @@ def test_the_agent_lists_and_calls_the_bound_plugs(client, world):
     assert rows[0]["plug"] == "github" and rows[0]["risk"] == "read" and rows[0]["workspace"] == WS and rows[0]["session"] == "sess1"
     assert posted == [(ORG, "plug.call", 1.0, {"workspace": WS, "task_id": "sess1", "harness_id": hid})]
 
-    out = _rpc(client, tok, "tools/call", {"name": "insforge.query_rows",
+    out = _rpc(client, tok, "tools/call", {"name": "insforge_query_rows",
                                            "arguments": {"table": "orders", "filters": {"status": "eq.open"}, "limit": 5}})
     assert out["isError"] is False and json.loads(out["content"][0]["text"]) == [{"id": 1, "status": "open"}]
     assert dict(ven.calls[-1].url.params) == {"status": "eq.open", "limit": "5"}
     # a tool the binding narrowed away, and one from a plug that is not bound
-    for name in ("insforge.insert_rows", "vercel.get_project", "github.nothing", "nonsense"):
+    for name in ("insforge_insert_rows", "vercel_get_project", "github_nothing", "nonsense"):
         out = _rpc(client, tok, "tools/call", {"name": name, "arguments": {}})
         assert out["isError"] and "No tool named" in out["content"][0]["text"], name
 
@@ -279,13 +279,13 @@ def test_the_vendors_refusal_is_the_agents_tool_error_and_still_a_call(client, w
     _post(client, f"/v1/harnesses/{hid}/servers/plugs", {"plugs": ["github"]})
     reg.records[(WS, "github")] = _record("github")
     tok = gw._mint_hosted_cred(hid, "sess2", _key(hid))
-    out = _rpc(client, tok, "tools/call", {"name": "github.get_file_contents", "arguments": {"path": "bad.md"}})
+    out = _rpc(client, tok, "tools/call", {"name": "github_get_file_contents", "arguments": {"path": "bad.md"}})
     assert out["isError"] and out["content"][0]["text"] == "GitHub answered 422: Validation Failed"
     rows = _calls(hid)
     assert rows[0]["outcome"] == "error" and rows[0]["error"] == "GitHub answered 422: Validation Failed"
     assert len(posted) == 1
     # missing arguments never reach the vendor
-    out = _rpc(client, tok, "tools/call", {"name": "github.get_issue", "arguments": {}})
+    out = _rpc(client, tok, "tools/call", {"name": "github_get_issue", "arguments": {}})
     assert out["isError"] and out["content"][0]["text"] == "number is required"
     assert not [c for c in ven.calls if "/issues" in c.url.path]
 
@@ -295,7 +295,7 @@ def test_refusals_by_plug_state_are_not_metered(client, world, monkeypatch):
     hid = _harness(client)
     _post(client, f"/v1/harnesses/{hid}/servers/plugs", {"plugs": ["github"]})
     tok = gw._mint_hosted_cred(hid, "sess3", _key(hid))
-    call = {"name": "github.get_file_contents", "arguments": {"path": "README.md"}}
+    call = {"name": "github_get_file_contents", "arguments": {"path": "README.md"}}
 
     def refused(contains: str):
         out = _rpc(client, tok, "tools/call", call)
@@ -314,14 +314,10 @@ def test_refusals_by_plug_state_are_not_metered(client, world, monkeypatch):
     refused("needs attention")
     reg.records[(WS, "github")] = _record("github", tenant="global")            # never the platform pool
     refused("needs attention")
-    monkeypatch.setattr(gw, "_PLUGS_ORGS", set())
-    reg.records[(WS, "github")] = _record("github")
-    refused("not available on this account")
     assert ven.calls == [] and posted == []
     assert {r["outcome"] for r in _calls(hid)} == {"refused"}
 
     # a switched-off entry and a token for another harness's record answer the same way
-    monkeypatch.setattr(gw, "_PLUGS_ORGS", {ORG})
     thief = _harness(client)
     _post(client, f"/v1/harnesses/{thief}/servers/plugs", {"plugs": ["github"]})
     stolen = gw._mint_hosted_cred(thief, "sessX", _key(hid))
@@ -341,7 +337,7 @@ def test_the_credential_is_read_again_only_when_the_version_changes(client, worl
     _post(client, f"/v1/harnesses/{hid}/servers/plugs", {"plugs": ["github"]})
     reg.records[(WS, "github")] = _record("github", version=3)
     tok = gw._mint_hosted_cred(hid, "sess4", _key(hid))
-    call = {"name": "github.get_file_contents", "arguments": {"path": "README.md"}}
+    call = {"name": "github_get_file_contents", "arguments": {"path": "README.md"}}
     reg.reads = 0                                                            # the attach read the status once
     assert _rpc(client, tok, "tools/call", call)["isError"] is False
     assert reg.reads == 1
@@ -368,7 +364,7 @@ def test_every_call_lands_in_the_sessions_trace(client, world, monkeypatch):
     monkeypatch.setattr(gw, "_trace_put", _put)
     monkeypatch.setitem(gw._session_trace, "sess5", {"prefix": "traces/sess5", "count": 0})
     tok = gw._mint_hosted_cred(hid, "sess5", _key(hid))
-    _rpc(client, tok, "tools/call", {"name": "github.get_file_contents", "arguments": {"path": "README.md"}})
+    _rpc(client, tok, "tools/call", {"name": "github_get_file_contents", "arguments": {"path": "README.md"}})
     assert len(chunks) == 1 and chunks[0][0].startswith("traces/sess5/events/")
     ev = json.loads(chunks[0][1])
     assert ev["type"] == "plug" and ev["plug"] == "github" and ev["tool"] == "get_file_contents"
@@ -400,10 +396,6 @@ def test_a_package_that_requires_plugs_gets_them_on_install(client, world, monke
     # a malformed requires is refused, not guessed at
     r = _post(client, "/v1/harnesses", {"name": "Bad", "base": "claude-code", "plugins": [_package({"plugs": "github"})]})
     assert r.status_code == 422 and "requires" in r.text
-    # held: the package installs, the plugs wait for the org to be let in
-    monkeypatch.setattr(gw, "_PLUGS_ORGS", set())
-    r = _post(client, "/v1/harnesses", {"name": "Held", "base": "claude-code", "plugins": [_package({"plugs": ["github"]})]})
-    assert r.status_code == 200 and r.json()["mcpServers"] == []
 
 
 # ── the tool surface itself ──────────────────────────────────────────────────────────────────
@@ -420,7 +412,7 @@ def test_the_tool_table_is_well_formed():
     assert plugs_plane.find("insforge", "delete_rows")["risk"] == "destructive"
     assert plugs_plane.find("vercel", "deploy_from_repo")["risk"] == "write"
     listed = plugs_plane.tool_list(["github"], {"github": ["get_repo"]})
-    assert [t["name"] for t in listed] == ["github.get_repo"] and listed[0]["description"].startswith("[GitHub, read]")
+    assert [t["name"] for t in listed] == ["github_get_repo"] and listed[0]["description"].startswith("[GitHub, read]")
 
 
 def test_push_files_deploy_and_insert_drive_the_vendors_as_documented(world):
@@ -443,12 +435,30 @@ def test_push_files_deploy_and_insert_drive_the_vendors_as_documented(world):
                                                   {"token": VC_TOKEN}, _record("vercel")["config"])))
     assert out["id"] == "dpl_1" and out["readyState"] == "READY"
     assert json.loads(ven.calls[1].content)["target"] == "production"
+    assert "note" not in out                      # production was asked for and given: nothing to say
+    # A project's first deployment is production at Vercel whatever is asked (seen twice on the
+    # hosted service, 2026-10-05): a preview request answered with a production deployment says so
+    # and what to do.
+    out = json.loads(asyncio.run(plugs_plane.call("vercel", "deploy_from_repo", {},
+                                                  {"token": VC_TOKEN}, _record("vercel")["config"])))
+    assert out["target"] == "production" and "first deployment" in out["note"] and "again" in out["note"]
+    ven.target = None                              # the second deployment on: a preview, as asked
+    out = json.loads(asyncio.run(plugs_plane.call("vercel", "deploy_from_repo", {},
+                                                  {"token": VC_TOKEN}, _record("vercel")["config"])))
+    assert "note" not in out and out.get("target") != "production"
+    ven.target = "production"
+    assert "FIRST deployment" in plugs_plane.find("vercel", "deploy_from_repo")["description"]
     out = json.loads(asyncio.run(plugs_plane.call("vercel", "get_project", {}, {"token": VC_TOKEN}, _record("vercel")["config"])))
     assert out["domains"] == ["site.vercel.app"] and out["link"]["repo"] == "site"
 
     out = json.loads(asyncio.run(plugs_plane.call("insforge", "insert_rows", {"table": "orders", "rows": [{"status": "new"}]},
                                                   {"api_key": INF_KEY}, _record("insforge")["config"])))
     assert out == [{"status": "new"}]
+    # a table's columns live at the vendor's /schema route; the path without it is its not-found page
+    out = json.loads(asyncio.run(plugs_plane.call("insforge", "describe_table", {"table": "orders"}, {"api_key": INF_KEY},
+                                                  _record("insforge")["config"])))
+    assert out["columns"] == [{"columnName": "status", "type": "string"}]
+    assert ven.calls[-1].url.path == "/api/database/tables/orders/schema"
     with pytest.raises(plugs_plane.PlugToolError):
         asyncio.run(plugs_plane.call("insforge", "delete_rows", {"table": "orders", "filters": {}}, {"api_key": INF_KEY},
                                      _record("insforge")["config"]))
@@ -482,10 +492,10 @@ def test_a_missing_grant_is_named_before_the_vendor_is_asked(client, world):
     rec["config"]["permissions_missing"] = ["issues", "actions"]
     reg.records[(WS, "github")] = rec
     tok = gw._mint_hosted_cred(hid, "sess6", _key(hid))
-    out = _rpc(client, tok, "tools/call", {"name": "github.create_issue", "arguments": {"title": "x"}})
+    out = _rpc(client, tok, "tools/call", {"name": "github_create_issue", "arguments": {"title": "x"}})
     assert out["isError"] and "not granted issues access" in out["content"][0]["text"]
     assert ven.calls == [] and posted == [] and _calls(hid)[0]["error"] == "no issues permission"
-    out = _rpc(client, tok, "tools/call", {"name": "github.get_file_contents", "arguments": {"path": "README.md"}})
+    out = _rpc(client, tok, "tools/call", {"name": "github_get_file_contents", "arguments": {"path": "README.md"}})
     assert out["isError"] is False                                            # contents was granted
 
 

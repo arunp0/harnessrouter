@@ -39,7 +39,6 @@ def client():
 def world(monkeypatch):
     ven, posted = tb.Vendor(), []
     monkeypatch.setattr(gw, "PLUGS_REGISTRY_URL", "")          # no engine: the local registry answers
-    monkeypatch.setattr(gw, "_PLUGS_ORGS", {"*"})
     monkeypatch.setattr(browser_plane, "API_KEY", tb.VENDOR_KEY)
     monkeypatch.setattr(browser_plane, "transport", httpx.MockTransport(ven.handle))
     monkeypatch.setattr(browser_plane, "connector", tb._connect)
@@ -49,6 +48,9 @@ def world(monkeypatch):
     for s in list(browser_plane.sessions().values()):
         s.closed = True
     browser_plane.sessions().clear()
+    browser_plane.registry = browser_plane.LocalRegistry()
+    gw._browser_open_locks.clear()
+    gw._plug_trace_handles.clear()
     gw._plug_fields_cache.clear()
     yield ven, posted
 
@@ -79,7 +81,7 @@ def test_the_catalog_and_the_browser_connected_here(client, world):
     ven, posted = world
     cat = _req(client, "GET", "/v1/plugs").json()
     assert cat["workspace"] == WS
-    assert [p["type"] for p in cat["plugs"]] == ["browser", "github", "vercel", "insforge"]
+    assert [p["type"] for p in cat["plugs"]] == ["browser", "github", "vercel", "insforge", "microsoft365"]
     b = cat["plugs"][0]
     assert b["status"] == "missing" and b["source"] == "platform" and b["official"] is True and b["tools"] == 13
     assert b["pricing"]["usd_per_unit"] == 0.02 and b["pricing"]["markup"] == 0.0 and b["secrets_needed"] == []
@@ -90,7 +92,7 @@ def test_the_catalog_and_the_browser_connected_here(client, world):
     r = _req(client, "POST", f"/v1/harnesses/{hid}/servers/plugs", {"plugs": ["browser"]})
     assert r.status_code == 200 and r.json()["status"] == {"browser": "missing"}
     tok = gw._mint_hosted_cred(hid, "sess1", gw._hosted_secret_key(hid, "mcp.plugs"))
-    out = _rpc(client, tok, "browser.get_url")
+    out = _rpc(client, tok, "browser_get_url")
     assert out["isError"] and out["content"][0]["text"].startswith("The workspace has no Browser plugin connected")
 
     # the workspace turns it on, with its site lists
@@ -101,15 +103,15 @@ def test_the_catalog_and_the_browser_connected_here(client, world):
     assert d["version"] == 1 and d["secrets_set"] == []
     assert _req(client, "GET", f"/v1/harnesses/{hid}/servers/mcp.plugs").json()["status"] == {"browser": "connected"}
     # the agent browses; the site lists come from the record
-    out = _rpc(client, tok, "browser.navigate", {"url": "https://example.com/"})
+    out = _rpc(client, tok, "browser_navigate", {"url": "https://example.com/"})
     assert out["isError"] is False, out
     assert out["content"][0]["text"].startswith("Opened https://example.com/ (Example Domain)")
-    out = _rpc(client, tok, "browser.navigate", {"url": "https://public.example/leak"})
+    out = _rpc(client, tok, "browser_navigate", {"url": "https://public.example/leak"})
     assert out["isError"] and "outside the ones" in out["content"][0]["text"]
     # a settings change is a new version, read on the next call
     r = _req(client, "PUT", "/v1/plugs/browser", {"enabled": True, "config": {"allow_domains": []}})
     assert r.json()["version"] == 2 and r.json()["config"]["allow_domains"] == [] and r.json()["config"]["deny_domains"] == ["ads.example.com"]
-    assert _rpc(client, tok, "browser.navigate", {"url": "https://public.example/leak"})["isError"] is False
+    assert _rpc(client, tok, "browser_navigate", {"url": "https://public.example/leak"})["isError"] is False
     # the count the Plugins page shows
     other = _harness(client)
     a = _req(client, "GET", "/v1/plugs/browser/attachments").json()
@@ -122,7 +124,7 @@ def test_the_catalog_and_the_browser_connected_here(client, world):
     # turned off: the tools refuse in a sentence, the record stays
     r = _req(client, "PUT", "/v1/plugs/browser", {"enabled": False})
     assert r.json()["status"] == "disabled"
-    out = _rpc(client, tok, "browser.get_url")
+    out = _rpc(client, tok, "browser_get_url")
     assert out["isError"] and "turned off" in out["content"][0]["text"]
     assert _req(client, "GET", "/v1/plugs").json()["plugs"][0]["status"] == "disabled"
 
@@ -148,7 +150,7 @@ def test_a_credentialed_plugin_keeps_its_secret_in_the_store(client, world, monk
     hid = _harness(client)
     assert _req(client, "POST", f"/v1/harnesses/{hid}/servers/plugs", {"plugs": ["github"]}).json()["status"] == {"github": "connected"}
     tok = gw._mint_hosted_cred(hid, "sess2", gw._hosted_secret_key(hid, "mcp.plugs"))
-    out = _rpc(client, tok, "github.get_file_contents", {"path": "README.md"})
+    out = _rpc(client, tok, "github_get_file_contents", {"path": "README.md"})
     assert out["isError"] is False, out
     assert json.loads(out["content"][0]["text"])["content"] == "hello" and calls[-1].url.host == "api.github.com"
     assert _rows(hid, "github")[-1]["outcome"] == "ok"
@@ -197,3 +199,27 @@ def test_a_harness_created_without_a_workspace_header_is_in_the_default_workspac
     with um.patch.object(gw, "PLUGS_REGISTRY_URL", "http://registry"):
         assert gw._harness_workspace_for_plugs({"workspace": ""}) == ""
         assert gw._harness_workspace_for_plugs({"workspace": "ws1"}) == "ws1"
+
+
+def test_the_sheet_reads_the_tools_and_remove_forgets_the_record_and_its_credential(client, world):
+    """The console's detail sheet lists a plugin's tools from the gateway (the same list the agent
+    gets) and Remove deletes the record and the secret it kept; connecting again starts clean."""
+    r = _req(client, "GET", "/v1/plugs/github/tools")
+    assert r.status_code == 200 and r.json()["label"] == "GitHub"
+    names = [t["name"] for t in r.json()["tools"]]
+    assert "get_file_contents" in names and "create_pull_request" in names
+    assert all(set(t) == {"name", "description", "risk"} for t in r.json()["tools"])
+    assert _req(client, "GET", "/v1/plugs/nonsense/tools").status_code == 404
+
+    r = _req(client, "PUT", "/v1/plugs/github", {"enabled": True, "config": {"repo": "acme/site"}, "secrets": {"token": GH_TOKEN}})
+    assert r.status_code == 200 and r.json()["status"] == "connected", r.text
+    ref = f"plug-{gw._plug_safe(WS)}-github-token"
+    assert asyncio.run(gw.BACKING.secrets.get(ORG, ref)) == GH_TOKEN
+
+    r = _req(client, "DELETE", "/v1/plugs/github")
+    assert r.status_code == 200 and r.json() == {"type": "github", "workspace": WS, "removed": True}
+    assert asyncio.run(gw.BACKING.secrets.get(ORG, ref)) is None
+    cat = {p["type"]: p for p in _req(client, "GET", "/v1/plugs").json()["plugs"]}
+    assert cat["github"]["status"] == "missing" and cat["github"]["secrets_set"] == []
+    assert _req(client, "DELETE", "/v1/plugs/github").status_code == 404
+    assert GH_TOKEN not in "".join(_seen[-6:])

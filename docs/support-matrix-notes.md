@@ -6,6 +6,308 @@ The tables in [support-matrix.md](support-matrix.md) were produced by `scripts/s
 
 The run started on v0.13.5 and finished on v0.13.13. Every release between them came out of a finding below and was deployed on the instance behind a live-turn gate before the next column: 0.13.5 (local blob store lists by prefix), 0.13.6 (read caches, the word "refused" is not a key refusal), 0.13.7 (a Codex history kept whole under the same account, finished turns release their process handle), 0.13.8 (a Google key can be saved, qwen drops gpt-5.3-codex, a task reopened by URL keeps its model, the broker resends a Google request without the refused field, a self-hosted sandbox reaches the broker on loopback), 0.13.9 (opencode's base carries /v1), 0.13.10 (the relay's base carries its API version), 0.13.11 (the claude CLI strips it), 0.13.12 (a checkpoint that cannot be restored aborts the turn), 0.13.13 (owner trust normalises an Azure base like the broker).
 
+## hermes and Codex on Azure name the model that served them (2026-10-15)
+
+The open item from 0.33.0-rc.15: hermes switching into gpt-5.5 on Azure finished with no served
+model, four of four, and Codex the same, so the same-model rule could not judge those turns. Neither
+CLI reports one; the relay reads it, and both bases called Azure directly (Codex also OpenAI's own
+endpoint). Both now ride the relay at the connection's own base. Found on the way: the turn's route
+was the first placeholder in the environment, and hermes registers its image question route first,
+so a hermes turn whose image questions ride the relay read its served model, usage and finish
+reason off the image model.
+
+Measured on 0.34.0 in a side container on the test VM (codex and hermes only, a fresh volume), one
+turn each straight to the runner, gpt-5.5 on the instance's Azure resource, "Reply with exactly the
+word: pong", the hermes turn with its image questions routed through the relay. Then the same image
+with this change's runner, then the stock one again with the provider's cache warm:
+
+| Turn | 0.34.0 | with the change | 0.34.0, cache warm |
+|---|---|---|---|
+| codex (exec) | no model; 11,637 in | gpt-5.5; 1,525 in + 10,112 cached | no model; 11,637 in |
+| codex (app-server) | no model; 12,372 in | gpt-5.5; 1,236 in + 11,136 cached | no model; 1,236 in + 11,136 cached |
+| hermes | no model; 421 in | gpt-5.5; 421 in + 10,240 cached | no model; 421 in |
+
+So the usage changes too. Codex's exec stream counts cached input as input (every cached token at
+the full price) and hermes's counters leave cached input out; the provider's own split, read by the
+relay, replaces both, as it already did on every relayed route. Codex's app-server already split
+its own count and gains only the served model. Codex compacts a long thread locally behind the
+relay; on an Azure URL it had used the provider's /responses/compact (0.154.0). It sends
+`store: false` either way.
+
+## Muse Wonder (2026-10-14 and 15)
+
+Meta announced two models. Muse Wonder Full has no API: Meta serves it only inside its own Muse Code
+subscription, so no connection can reach it and it is not in the catalog. Muse Wonder is, as
+`muse-wonder-1.0` (Meta's own API id), read off each vendor's own list and then called with a tool,
+streamed and not:
+
+| Provider | Id | Result |
+|---|---|---|
+| Vercel AI Gateway | `meta/muse-wonder-1.0` | answers as itself, tool arguments whole |
+| OpenRouter | `meta/muse-wonder` | answers as itself, tool arguments whole ($4 / $20 per million) |
+| TokenRouter | either name | "No available channel" |
+| LLMTR | | not listed |
+
+It cannot be turned off. OpenRouter refuses `none` ("Reasoning is mandatory for this endpoint") and
+Vercel accepts it and thinks anyway. One question that needs work, two samples a level, the
+provider's own reasoning-token count:
+
+| Level | OpenRouter | Vercel |
+|---|---|---|
+| none | refused | 606, 661 |
+| minimal | 474, 313 | 706, 502 |
+| low | 1082, 922 | 531, 457 |
+| medium | 1149, 1782 | 1181, 1360 |
+| high | 1419, 1245 | 1085, 1321 |
+| xhigh | 1517, 1425 | 1563, 826 |
+
+So its levels are minimal to xhigh, and a turn that asks for none gets minimal.
+
+Measured on the review instance (0.34.0-rc.7) on every base that offers the Meta family (21), one
+provider column at a time with the instance's route for the model pointed at that integration:
+
+| | OpenRouter | Vercel AI Gateway |
+|---|---|---|
+| five scenarios (first, follow-up, switch, artifact, recycle) | 21 of 21 | 21 of 21 |
+
+Then the plugin package (skill, stdio MCP, rows, SSE, streamable HTTP), the browser column and a
+one-slide deck carrying a stamp, on the instance's own route (Vercel). Seventeen bases passed all
+three. Four failed, each on every turn that met the failure, and do not offer it:
+
+- **agentzero:** "Agent stopped after 5 consecutive unusable model responses", on the skill turn, both
+  browser tries and the deck.
+- **aider:** the model writes the command it means to run behind its sentence, the code fence opened
+  mid-line ("as directed.```bash"), so aider finds nothing to run: all five plugin turns, both
+  browser tries, and no deck.
+- **openhands:** its next request carries two outputs for one tool call, and the provider refuses it
+  ("Duplicate function_call_output for call_id ..."): the four MCP transports, both browser tries and
+  the deck. Every other model passes on the same base and route.
+- **cheetahclaws:** the five scenarios, the plugin package and the browser passed, but no deck came
+  within the ten-minute limit, twice.
+
+## Gemini 4 Argon (2026-10-14, the day Google announced it)
+
+Read off each vendor's own list that day: Google AI Studio `gemini-4-argon` (generateContent,
+1,048,576 input tokens, thinking), OpenRouter and Vercel `google/gemini-4-argon` ($2 / $10 per
+million; Vercel also lists flex and priority tiers). TokenRouter and LLMTR do not list it. A one-line
+completion through each of the three came back as `gemini-4-argon` itself.
+
+Thinking levels, by `reasoning_effort` on Google's OpenAI-compatible surface: none, low, medium and
+high answered; minimal ("Thinking level MINIMAL is not supported") and xhigh were refused. OpenRouter
+refuses none ("Reasoning is mandatory"), as for every Gemini; Vercel took every level.
+
+Measured on the review instance (0.34.0-rc.5), on every base that offers the Gemini family (22,
+zeroclaw included), one provider column at a time with the instance's route for the model pointed at
+that integration:
+
+| | Google AI Studio | OpenRouter | Vercel AI Gateway |
+|---|---|---|---|
+| five scenarios (first, follow-up, switch, artifact, recycle) | 22 of 22 | 22 of 22 | 22 of 22 |
+
+Every Argon turn was served by `gemini-4-argon` (Google) or `google/gemini-4-argon` (the aggregators).
+Gemini CLI runs on a Google connection only, so its OpenRouter and Vercel rows ran on Google; goose and
+cheetahclaws cannot be driven by a Google connection, so their Google row ran on OpenRouter. On the
+instance's own route (Vercel), every one of the 22 also passed the plugin package (skill, stdio MCP,
+rows, SSE, streamable HTTP), the browser column and a one-slide deck carrying a stamp. Offered on all 22.
+
+## After 0.33.0: three Qoder ids taken off, two fixes from the hosted service's column (2026-10-14)
+
+The hosted service measured the five bases of 0.33.0 on its own connections: first turn, follow-up
+and a one-slide `.pptx` for every offered model (failures retested once), then a deck tour, the
+plugin package and the browser per base. mimo, jcode, opensquilla and nanobot passed on every
+offered model, the same lists as here.
+
+- **qoder offers 12, not 15.** efficient, kmodel and qmodel_latest built the deck in Qoder's sandbox
+  and answered without delivering it. `DeliverArtifacts` is the only way a file comes back from
+  Qoder, so the person got no file: qmodel_latest on both tries, efficient and kmodel on one of two.
+  Qoder serves these ids to every instance alike, so they are off here too.
+- **jcode's browser calls were refused by the runner's MCP bridge** (#458). jcode's model writes its
+  own `intent` argument into a remote tool's call, and the bridge's input check refused it against
+  the browser's closed schemas. On 0.33.0 a jcode browser turn on gpt-5.4 lost three calls before
+  the model corrected itself. With the fix: three turns (gpt-5.4 twice, claude-sonnet-5.5), no
+  call refused.
+- **Hermes probed the runner's relay as a local model server** (#457): 16 requests and about 1.3 s
+  before every Hermes turn's first model call. The relay answers them now.
+- Checked and not needed here: Gemini tool declarations through Vercel (the runner's relay already
+  normalises them once the channel's validator names the problem, measured 2026-10-07 on the same
+  nanobot argument), and the model catalog route (0.6 s here, the same as the bases route; hosted's
+  slowness came from its remote secret store).
+
+## zeroclaw reviewed on the review instance (2026-10-14, 0.34.0-rc.1 to rc.5)
+
+Every model zeroclaw offered went through the five console scenarios, the plugin package (skill, stdio
+MCP, rows, SSE, streamable HTTP), the browser column and a one-slide deck carrying a stamp; on top, the
+family tour (13 of 13 families in one conversation), the environments column (3 of 3), the
+custom-harness dimension, and the five-turn PDF conversation (5 of 5). Each fix below was measured
+before and after on the same instance; the section further down (2026-10-13) is the contributor's own.
+
+- **Paths.** zeroclaw's risk profile defaults to `workspace_only = true` and a denylist holding /etc
+  and /usr: `head /etc/os-release`, `ls /env` and a python3 under /usr were refused as "forbidden
+  absolute paths outside the workspace". Both are opened; the session's OS user is the boundary.
+- **Skills with scripts were skipped** ("script-like files are blocked by skill security policy"):
+  the Office skill, for its install.sh. `[skills] allow_scripts = true`.
+- **The shell starts empty** and passes only the names it is given: the image skill's `HR_IMAGE_*`
+  ("image generation is not configured for this Harness") and `OFFICECLI_RESIDENT_FLUSH` (seven
+  decks handed back empty: officecli wrote on idle, after a ten-second turn had ended) are named now.
+- **The step budget read as success.** zeroclaw summarises and stops with `end_turn` at
+  `max_tool_iterations`; its note in the answer now ends the turn as `max_steps`.
+- **34 tools, not 20.** Captured from the request zeroclaw sends (a fake chat/completions server):
+  cron and schedule, channel and session messaging, pushover, git_forge, backup, canvas, weather,
+  and none of the memory tools the first list named. `allowed_tools` is the measured set of 14
+  (MCP tools are admitted on top of it); `delegate` fails ("Missing 'agent' parameter"); `llm_task`
+  takes a model override and `deliver_file` hands back a copy the driver drops, so both are never offered.
+- **"You are hr".** zeroclaw names the agent after its config alias in the persona it seeds; the
+  alias is `zeroclaw` now.
+- **State in the checkpoint repo**, every turn (three SQLite stores, the trace log, persona files,
+  copied skills): `.harness/zeroclaw/` rides the tar (#460 did the same for nanobot, opensquilla, goose).
+- **Not offered:** grok-4.20 (no deck twice: "invalid semantic completion", no text and no tool call);
+  nemotron-3-super (no deck; off every sibling base already); qwen3.8-flash (answered the follow-up
+  with the first turn's codeword, and provider errors on the artifact after an outage had cleared).
+- **Known and left:** zeroclaw keeps a turn's messages only when the turn succeeds, so after a cancel
+  the next turn does not know what the cancelled one did.
+- **The PDF conversation's first turn** ("follow your instruction: say hi" under an instruction to make
+  a PDF): GPT models answer "hi" without a PDF on zeroclaw, pi and opencode alike (32 of 55 zeroclaw
+  models, every family represented). It is a property of the prompt, not of a base, and was not used
+  to take models off; the rest of the conversation passes on every model tried.
+
+## The four new bases offer only what they run reliably (2026-10-12, 0.33.0-rc.5 to rc.11, the review instance)
+
+The rule from here on, for every base: a base offers the models it was measured to run reliably on
+every dimension, and one failure that is the model's own and repeats (on its retest, or in the same
+dimension on another base) takes the model off that base. A failure whose cause was the product is
+fixed and measured again instead, never used to drop or to keep a model.
+
+**What was measured, per base and per model.** Every model each base could reach went through the
+five console scenarios twice (0.33.0-batch3.3 and batch3.7, seven connections) and the family tour.
+Then each model left on a base ran, through the API on the review instance: the plugin skill, an
+MCP tool over stdio, the free-form rows tool, SSE and streamable HTTP (the row passes only when the
+model asked for served it), the browser plug (navigate and click, the answer naming the page), and a
+one-page deck with a stamp no other turn could make, downloaded, opened and checked for the stamp.
+Every first failure was retested once.
+
+**What each base offers.** mimo 47, jcode 50, opensquilla 51, nanobot 51. Every offered model passed
+every dimension above on the build that ships, with one exception named below.
+
+**Taken off, with what each did** (the same text is above `_NOT_OFFERED` in gateway/app.py):
+- mimo: claude-opus-4.7 (refuses the scenario prompt, twice), llama-3.3-70b (answers something
+  else), llama-4-maverick (writes the tool call as text, twice), qwen3.8-flash (mixes up its
+  replies), gpt-5.6-luna (overruns the turn), hunyuan-4-preview (no deck in the tour),
+  nemotron-3-super, kimi-k3 (tool call as text), mistral-medium-3.5 (`<use_skill>officecli</use_skill>`
+  as text, no deck, two of three), gemini-3.5-flash and gemini-3.6-flash (a blank deck and the turn
+  ends, twice each), gpt-5.4-mini (runs the plugin's skill when asked for a named MCP tool).
+- jcode: grok-build-0.1 and hunyuan-4-preview (loop on tools to the cap), kimi-k3 (no file, twice),
+  gemini-3-flash-preview (degenerates on its first turn), nemotron-3-super, llama-3.3-70b (writes
+  deck.pptx as a file that is not a deck, twice).
+- opensquilla: claude-opus-4.7 (refuses the prompt, twice), grok-4.20 and llama-3.3-70b (no file),
+  hunyuan-4-preview (answers something else), nemotron-3-super.
+- nanobot: grok-build-0.1 (loops on exec), kimi-k3 and llama-3.3-70b (no file), grok-4.5 (stream
+  stalls), nemotron-3-super.
+- nemotron-3-super, on all four: does not follow a skill (mimo twice, jcode, opensquilla) and makes
+  a deck without the asked-for text or none (mimo, jcode, nanobot).
+
+**Product defects the measurement found, each fixed and measured again** (all in this release, eleven in all):
+- jcode's tool calls reached the console with no arguments: the runner sent each call at
+  `tool_start` and dropped the `tool_input` pieces that carry them. Held until complete now; a
+  console check (scripts/support-matrix/ui-tool-rows.mjs) opens the Bash row and finds the command.
+- A turn waiting for a slot on a busy single-container instance read `failed`, then `completed`: the
+  orphan sweep took a `starting` session with no heartbeat for a dead one. The accept-time write
+  stamps the heartbeat and `_turn_slot` renews it while the turn waits.
+- mimo could reach providers other than the turn's connection: a model's `actor` subagent named
+  `xiaomi/mimo-v2.5`, MiMo's service refused the key, and a finished deck turn failed as "your key
+  was refused". opencode and mimo configs now set `enabled_providers: ["hr"]`.
+- mimo's 23 built-in skills competed with the harness's: its pptx/docx/xlsx/pdf-official need
+  python-pptx and the like, which no sandbox here can install. `MIMOCODE_DISABLE_BUILTIN_SKILLS=1`.
+- jcode's own `browser` needs a Firefox extension bridge that never connects in the sandbox; a
+  model that picked it looped for two hours (459 tool calls). Off on every jcode turn, with
+  `macos_computer_use`, `gmail` and `maintainer_feedback`.
+- A file the agent committed on a session's first turn was never handed back (the collection
+  cursor was set at that turn's collection, after the commit). Set at the turn's start now.
+- A LibreOffice profile inside the workspace (a model checking its deck by rendering it) filled the
+  25 files a turn hands back and pushed the deck out. A profile's `user/` tree is not a deliverable.
+  gpt-6.1-sol, briefly taken off opensquilla for this, is offered again and passes.
+- opensquilla's tool rows had no arguments while the turn ran (its progress events carry none).
+  The runner's relay now keeps each call's arguments as the model sends them, by call id, and the
+  row opens with them; the transcript fills any call the relay did not see when the turn ends.
+  Checked in the console mid-turn (scripts/support-matrix/ui-tool-rows-live.mjs).
+- opensquilla answered English prompts in Chinese, French or Spanish on GPT models (gpt-5.4: 8 of 8
+  in Chinese): its own system prompt's three reply-language rules. The runner takes them out of the
+  installed template; English prompts then got English answers (8 of 8) and Chinese prompts Chinese.
+  Its `cron` tool, whose scheduler never runs in a one-shot turn, is off too.
+- Every opensquilla answer replayed the conversation so far: the transcript of a resumed session
+  holds every turn and the end-of-turn replay read all of it. It starts at this turn's prompt now,
+  and the suite's follow-up fails an answer that repeats the first turn's.
+- A hermes turn the provider refused said only "↻ Resumed session …": the relay keeps the provider's
+  refusal on the route, and the turn's error is that refusal when hermes said nothing else.
+
+**The exception.** nemotron-3.5-lightning is the one offered model these bases reach through
+OpenRouter on the review instance, and that instance's OpenRouter key reached its spending limit
+during the re-measure on rc.9: its deck there could not run. It passed every dimension on rc.7.
+
+## Claude Haiku 5.5 (2026-10-07)
+
+Added in 0.31.12 beside Haiku 4.5 on every base that offers Haiku 4.5 except aider, with every
+provider naming its own id, read off the vendors' lists that day: Anthropic `claude-haiku-5-5`,
+OpenRouter and Vercel `anthropic/claude-haiku-5.5` (OpenRouter serves it as
+`anthropic/claude-haiku-5.5-20261007`, the same model), Bedrock `us.anthropic.claude-haiku-5-5`
+(from Anthropic's Bedrock id and the inference-profile form of the other 5.5 models; no Bedrock
+connection was measured). TokenRouter and llmtr do not list it, so it is in
+`_TOKENROUTER_NO_CHANNEL`. The same reading found Opus 5.5 on TokenRouter's and llmtr's lists; both
+now route it.
+
+Its price is set by prompt length (Anthropic's pricing page): up to 100,000 prompt tokens $0.10
+input, $0.01 cache read, $0.125 and $0.20 cache writes, $0.50 output per million tokens; over
+100,000, five times each. This instance keeps no price table of its own.
+
+Measured through the console of a side container (0.31.11 with this change), one column per
+connection, Haiku 4.5 as the switch partner:
+
+- Anthropic: 15 of 16 bases pass all five scenarios. aider failed the recycle scenario (after the
+  recycle it answered a word that was never asked for) in two of three runs, so Haiku 5.5 is left
+  out of aider's catalog. Claude Code runs it on the CLI the image pins (2.1.280); no bump.
+- Vercel AI Gateway: 17 of 17 bases pass all five.
+- OpenRouter: 16 of 16 pass all five (Claude Code could not use an OpenRouter connection then; it
+  can since 2026-10-13, through OpenRouter's Anthropic-shaped /api/v1/messages, and is not yet
+  measured on it).
+- Findings that are not about Haiku 5.5 and appear for Haiku 4.5 on the same bases: through the
+  Anthropic connection agentzero, aider, cline, grok, kimi, minimax and qwen read no prompt cache
+  (they do not ask Anthropic to cache, so every call pays the full input price); cline and dsh report
+  no served model, so the same-model rule cannot judge their turns.
+
+Thinking. The probe (`scripts/support-matrix/thinking/probe.py`) on Vercel and OpenRouter, chat
+and Messages: every level is accepted, `none` included (OpenRouter refuses to turn Opus and Sonnet
+5.5 off, not this one), and high and xhigh think more than medium; low thought as little as none on
+the probe's question. On Messages OpenRouter refuses `thinking: between_tools` for it by name and
+both routes accept `disabled`, so the runner now sends `between_tools` only for Opus and Sonnet 5.5.
+The thinking column on OpenRouter, where the provider counts thinking tokens: hermes, pi, opencode
+and goose pass (none spends nothing, low less than high). Through the Anthropic connection, which
+reports no thinking count, hermes passes, Claude Code and opencode record every level applied and
+fail only the output-token stand-in check (adaptive low spends about what none does), and pi records
+no level applied; pi does the same with Sonnet 5.5 there, so that is pi on an Anthropic connection,
+not this model. The same probe found Opus 5.5 through TokenRouter refuses every way of turning
+thinking off (`disabled`, `between_tools`, a budget), so `none` is not offered for it there.
+
+## Claude Sonnet 5.5 (2026-09-30)
+
+Added in 0.26.18 beside Sonnet 5 on every base that offers Sonnet 5, with every provider naming
+its own id (Anthropic `claude-sonnet-5-5`, Bedrock `us.anthropic.claude-sonnet-5-5`, OpenRouter,
+Vercel, TokenRouter and llmtr `anthropic/claude-sonnet-5.5`, all read off the vendors' lists that
+day). Measured on hr-test (0.26.18-rc.1) through the console, on the instance's TokenRouter
+connection, which is where the effective model map sends it:
+
+- 13 of 13 bases pass all five scenarios (first turn, follow-up, model switch, artifact, recycle):
+  claude-code, cline, dsh, hermes, opencode, pi, qwen, aider, kimi, openhands, cheetahclaws, goose,
+  omp. Claude Code runs it on the CLI the image pins (2.1.280); no bump.
+- Family tour on claude-code: one deck conversation handed from the base's default model into
+  Sonnet 5.5 and on to Sonnet 5 completed both turns with the deck produced; the other families of
+  the default list are not offered on Claude Code and were skipped as such.
+- A finding about the switch partner, not about Sonnet 5.5: with the column's partner forced to
+  `claude-opus-5`, omp's switch turn on TokenRouter failed with the provider's own sentence
+  ("Claude Code 2.1.257 does not support this model; version 2.1.280 or newer is required"), the
+  same channel limit Opus 5.5 met on 2026-09-22. Retested with Sonnet 5 as the partner, omp passes
+  all five. Sonnet 5.5 itself served on every base.
+- TokenRouter reports the served id in its dashed form (`claude-sonnet-5-5`) for a request of
+  `claude-sonnet-5.5`; the runner marks that as a substitution by string, and it is the same model.
+
 ## Columns
 
 - **tokenrouter** (the instance's own TokenRouter integration, 26 models): 169 pairs, 832 of 840. opencode with gemini-3.6-flash is refused on its tool schema (`Unknown name "$schema"`); qwen with gpt-5.3-codex answers text turns and fails its tool turn (a Responses-only model on a chat/completions harness; qwen no longer lists it since 0.13.8); Codex refuses gpt-5.3-codex after another model by design.
@@ -575,6 +877,11 @@ wrong. Two suggestions, both the maintainer's call: let the dimension name the t
 (a base that has no `WebSearch` could disable one it has), and make the script write something the
 agent cannot predict from reading it.
 
+**The first of those two was done on 2026-10-03** (see "The disabled tool is the base's own"
+below): `custom-harness.mjs` now carries a per-base `DISABLED_TOOL` table, held to the gateway's
+`_BASE_CATALOG` by a test. The second — a script whose output the agent cannot predict from reading
+it — is still open.
+
 **Known open question: `max_context_size`.** kimi requires one per model and plans compaction
 against it; the catalog carries no per-id window, so `KIMI_CONTEXT_WINDOW` holds one value for all
 ids, exactly as `CODEX_CONTEXT_WINDOW` does for codex. Being wrong changes WHEN the agent compacts,
@@ -691,11 +998,15 @@ runner's, where the same class of bump breaks FastAPI outright.
 **Known limitation: no tool loop, so the custom-harness dimension's disabled tool is not aider's.**
 The request body's keys are exactly `['messages','model','temperature']` — no `tools`, no
 `functions`. aider's withholdable surface is the shell command and the URL scrape, which the gate
-really does refuse; but `custom-harness.mjs` disables the fixed id `WebSearch`, which matches
-nothing on this harness — so `disabled_tool_unused` would pass VACUOUSLY, as it already does for
-qwen, gemini and cline, whose catalogs carry no `WebSearch` either. The enforcement here is real and
-demonstrable; what is missing is a dimension that disables a tool the base under test actually
+really does refuse; but `custom-harness.mjs` disabled the fixed id `WebSearch`, which matches
+nothing on this harness — so `disabled_tool_unused` passed VACUOUSLY, as it also did for qwen,
+gemini and cline, whose catalogs carry no `WebSearch` either. The enforcement here is real and
+demonstrable; what was missing was a dimension that disables a tool the base under test actually
 lists.
+
+**Fixed 2026-10-03** (see "The disabled tool is the base's own" below). aider is the one base the
+table marks `null`: its catalog is a single tool, Shell, and the stamp task needs it, so the
+dimension says it cannot test the policy there instead of passing.
 
 
 ## aider × Google, the first paid column (2026-09-16)
@@ -1443,3 +1754,2538 @@ page is the record.
 **Not yet measured:** a hosted (brokered) turn, where the catalog rides the broker's
 `_broker_upstream_url`; Linux x86_64 (the pinned digest is the manifest's); the console's model picker
 does not say what `-contributor` means, only the notes and the catalog comment do.
+
+## The cheetahclaws backend: CheetahClaws 3.5.88 (2026-09-24)
+
+CheetahClaws (SAIL-Research-Lab/cheetahclaws, PyPI `cheetahclaws`, Apache-2.0), a Python
+reimplementation of the Claude Code agent loop, as the sixteenth base (#229). The turn process is
+`runner/cheetahclaws_driver.py` inside a pinned venv: the CLI's own agent loop
+(`cheetahclaws.agent.run`, the generator its REPL and its headless bridge runner consume) is
+driven in process and every event is re-emitted as it is yielded, `__hr_init` first and
+`__hr_result` last, normalised by `_cheetahclaws_to_claude`.
+
+### Behaviour measured before the column ran (3.5.88, against a stub and the live instance)
+
+- **No event stream, and the session file is not one.** `cheetahclaws -p` prints the final answer
+  and ANSI tool cards; `session_latest.json` is rewritten by `autosave_session` once per USER turn,
+  after `run_query` returns, never between messages. Tailing it would give a silent turn and then
+  everything at once. In process the loop's own events stream: conformance S-09 passed with "events
+  spread over 5.1s", and the console renders text deltas and tool cards as they happen.
+- **Provider failures are prose and exit 0.** Against a stub, `cheetahclaws -p` printed
+  `[Failed — APIConnectionError: Connection error.. Hint: …]` (unreachable),
+  `[Failed — AuthenticationError: Error code: 401 - {…}. Hint: Check your API key: /config …]`
+  (bad key) and `[Retry 1/3 after 6s — rate_limit: …]` ×3 then `[Failed — RateLimitError: Error
+  code: 429 …]`, exit 0 each time. The driver's verdict is the history's shape instead (the loop
+  appends an assistant message only for a completion that came back); the `[Failed — …]` sentence is
+  kept as the reason, minus a hint that names a slash command. Recorded, and pinned, in
+  `runner/tests/fixtures/cheetahclaws/`. Live: a key the gateway refuses failed the turn with
+  `Failed — BadRequestError: Error code: 400 - {… 'No connected db.' …}` (the gateway's own answer
+  to an unknown key), 27 s.
+- **A dead endpoint hung the turn.** The CLI builds its OpenAI client with the SDK's 600 s timeout
+  and two retries of its own under the loop's three: a turn aimed at an address the instance's
+  firewall drops was still `running` at 600 s with nothing in its record. The driver now gives every
+  client a 300 s read timeout (`HR_CHEETAHCLAWS_TIMEOUT`, aider's budget) and no SDK retries, so the
+  loop's ladder is the only one: the same turn failed at 581 s with `Failed — APIConnectionError:
+  Connection error.`, and an endpoint that accepts and never answers fails in 23 s at a 2 s timeout
+  (`Failed — APITimeoutError: Request timed out.`, pinned by a test).
+- **Resume.** No resume flag: `-p` always starts from an empty state, and continuing is the REPL's
+  `/resume`. The driver loads the session file (the CLI's own `_migrate_session`) when it names the
+  requested id and writes it back with the CLI's own `autosave_session`, the id held fixed per
+  session. `_resume_lost` asks the same file. Recycle through the API: two turns, the sandbox
+  recycled (hydrated from the checkpoint), the session file identical, the recall turn answered
+  `M1-tools-pool`.
+- **Instructions and skills.** The CLI reads `CLAUDE.md` only (walking up from the cwd, plus
+  `~/.claude/CLAUDE.md`); there is no AGENTS.md discovery in the package, so with both present only
+  CLAUDE.md is loaded. It drops the whole file when a line matches its prompt-injection scan; the
+  driver says so in the record. Skills land in the project-level `.cheetahclaws/skills/`, which the
+  loader reads first; `.cheetahclaws/` is CLI state (its `tasks.json` tracker too) and never a
+  produced file, and the tracker is not checkpointed.
+- **Tool policy is hard, measured with a control.** The driver sets the CLI's `disabled_tools`: the
+  tool leaves the schema the provider receives (stub capture) and a call to it is refused at
+  execution. Live, with Bash, Write, Edit, NotebookEdit and Agent withheld, the model still called
+  Bash and Write by name; each came back `Error: tool 'Bash' is not enabled by the 'full' tool
+  profile for this turn.`, no file was written, and the answer said it had no write tool. The same
+  request with nothing withheld wrote the file through Write. AskUserQuestion (it blocks on a
+  terminal nobody is at), ReadEmail/SendEmail (no mailbox is configured) and the tools of optional
+  extras the bare install lacks (WebBrowse, ReadPDF, ReadSpreadsheet, ReadImage) are withheld on
+  every turn and not offered as toggles.
+- **Served model and usage come from the relay's taps.** The session file carries gross prompt
+  tokens with no cache split and no model. The CLI's `custom/` client streams without
+  `stream_options`, so the relay asks for the usage chunk on this route (`stream_usage`, pinned
+  against an upstream that sends usage only when asked); a live turn's Response carried
+  `input_tokens` 9118 / `output_tokens` 31 off the relay, and conformance T-03 read the served
+  model the same way.
+- **MCP** connects in a background thread at import in `-p`, racing the first model call; the
+  driver waits for it, and a server that does not connect becomes `mcp_unavailable`.
+
+### Versions and the column
+
+The column in `docs/support-matrix.md` is `cheetahclaws-tokenrouter`, measured on hr-test
+(harnessrouter/harnessrouter:0.25.0, the release that carries this base; one container, the default
+`HR_BACKENDS`, the live data volume) on 2026-09-26, after the author's own measurements on a lab
+gateway (kept in the PR, #264). CheetahClaws 3.5.88 was installed by the entrypoint at boot (wheel
+digest verified, import check passed). The instance's own connections served the turns: TokenRouter
+for gpt-5.4 and claude-sonnet-5, and gpt-5.4-mini through the Custom OpenAI Chat connection with
+TokenRouter behind the switch, as `fill-connection.py` stamped them.
+
+- **Conformance** (`uhp-conformance` 2026.9.12.post2 from this tree, `--class full`, a harness on
+  the base with `--model gpt-5.4`): 75/75, CONFORMANT (full).
+- **Console column** (`run.mjs`, `HARNESSES=cheetahclaws`, three models): 3 pairs, 15 of 15
+  scenario runs passed, first turn to recycle. Two rows are served as the provider's dated alias of
+  the id asked for (`gpt-5.4-2026-03-05`, `gpt-5.4-mini-2026-03-17`), which the table notes and
+  rule 2 does not count against the pair.
+- **Custom harness** (`custom-harness.mjs`, `BASES=cheetahclaws`, the public MCP probe reachable
+  from hr-test): the stamp skill read, its script run from the workspace, `stamp.txt` produced,
+  WebSearch withheld and unused, MCP reached, 28 s.
+- **Plugin matrix** (`plugins/run-matrix.py --bases cheetahclaws --mode all`): skills 1/1, stdio
+  MCP 1/1, SSE 1/1 through the CLI's own client. Streamable HTTP 0/1 on 0.25.0: the CLI's own
+  streamable-HTTP client (`mcp_client/client.py`, `HttpTransport`) is answered 400 on `initialize`
+  by the probe, the same server its SSE end and the runner's bridge reach, so the turn ran without
+  the server and said so. Since 0.25.1 a streamable-HTTP server reaches this base through the
+  runner's stdio bridge (`_BRIDGED_TRANSPORTS`, the mechanism codex, dsh and goose use for SSE),
+  the way every other base reaches it; the CLI's client keeps SSE and stdio. Measured on 0.25.1
+  (hr-test, the same probe): skills 1/1, stdio 1/1, SSE 1/1, streamable HTTP 1/1
+  (`PROBE-HTTP-ef8e44614954`, 11.1 s).
+- **The family tour** (`family-tour.mjs`, 0.25.2, on Richard's own five-turn conversation, `SID=`
+  continued, one model per family, three runs on 2026-09-26): 12 of 14 families passed, first
+  edit to recycle of the same deck. gpt-5.4-mini 13 s, claude-sonnet-5 81 s, gemini-3.5-flash 20 s,
+  grok-4.5 16 s, deepseek-v4-flash 155 s (served as v4.1-flash), kimi-k3 40 s, qwen3.8-flash 20 s,
+  glm-5.3-flash 46 s, mistral-medium-3.5 20 s, step-3.7-flash 49 s, hunyuan-4-preview 33 s,
+  nemotron-3.5-lightning 33 s. Two families fail on this base:
+  - **muse-spark** (1.1 twice, 1.3 once): the CLI compacts the conversation for the model's smaller
+    context, and after the compaction the model runs the one edit into a loop of ninety-odd tool
+    calls (`ls`, `cat hello-world.md`, `TaskList`, re-deciding the original "convert the md to a
+    deck" from the summary, "Auto-fanout" sub-summaries of every result), never finishes, and is
+    stopped at the tour's ten-minute cap. No two calls are identical, so the CLI's loop guard does
+    not fire. The line is excluded from the base's catalog with that note.
+  - **llama-3.3-70b**: refused in 7 s, three times (the third on 0.25.3, where the relay logs the
+    body the CLI cuts off): `400 "This model only supports single tool-calls at once!"` from
+    CoreWeave, the provider serving the model. The conversation holds one assistant message with
+    two tool calls (gpt-5.4-mini's Glob and Grep, issued together on the tour's first edit), and
+    that endpoint refuses every later request that replays it. llama alone never writes such a
+    message, so a fresh harness of the base completes in 11 s, as on pi. The model stays offered
+    with this note; whether the relay should rewrite a parallel-call message into consecutive
+    single-call ones for such a provider, or the catalog should drop the model on bases whose
+    CLIs call tools in parallel, is Richard's call.
+  - kimi-k3 and qwen3.8-flash failed the second run's rows without a defect: the edits repeated
+    ones earlier families had made and both rightly wrote nothing. The tour stamps every edit
+    since, and both pass.
+- **In the browser** (the console on hr-test, the system harness, gpt-5.4): a task that writes a
+  file and runs a command completed in 15 s with the file card and the byte count in the answer.
+- **Not measured here:** the other provider columns (OpenRouter, Vercel, the hosted HarnessRouter
+  API) beyond the three pairs above, so `_MODEL_CATALOG["cheetahclaws"]` stays offered, not
+  measured, for the rest of its list; and a benchmark column.
+
+
+## The loopback relay answers when the provider does not (2026-09-29)
+
+The first family tour on the minimax base passed 7 of 14 families in one conversation: every family from kimi-k3
+on was recorded `not settled in 600s, stopped (cancelled)` with **no served model, no tool call and
+no reason** — except `glm-5.3-flash`, which passed in 12 s in the middle of the collapse. The
+obvious reading was the blanket 200k context window (above): a history too large for a model's real
+window. **It was not**, and two measurements say so. The conversation at its largest was 219 KB of
+messages plus a 12 KB system prompt and 27 KB of tool schemas — about 65k tokens, under the real
+window of every failing model — and the same families pass on that same session today, with a
+longer history (kimi-k3, qwen3.8-flash and minimax-m3 each re-run by hand, all completed in
+seconds). A conversation too long fails monotonically; this did not.
+
+**It was the loopback relay answering nothing when the provider answered nothing**, in two ways,
+both in `_forward`:
+
+- The upstream call caught only `urllib.error.HTTPError`. A refused connection, one dropped
+  mid-request, or a provider gone silent raised out of the handler; `ThreadingHTTPServer` printed a
+  traceback and closed the client socket **with no HTTP response at all**. The instance's log holds
+  ten of those (`http.client.RemoteDisconnected: Remote end closed connection without response`),
+  two inside the tour's failing window.
+- The relay's own wait was 600 s — the same as the cap above it — so a provider that accepted a
+  request and then went silent could never be REPORTED by the relay: the cap always fired first and
+  the turn was recorded as cancelled with nothing in it. That is the shape of six of the seven.
+
+Both are fixed in `runner/server.py`: transport failures now answer **502** (refused or dropped) or
+**504** (timed out) with `{"error":{"code":"upstream_unavailable",…}}` carrying the provider's own
+failure; a bare drop before any byte is retried once and a timeout is never retried (the provider
+may be generating, and a second request is a second bill); a stream that stops mid-answer carries
+the reason as its own error event and is left unterminated, and a body that stops arriving is a 502
+or 504, so neither reads as a complete answer; and `HR_RELAY_UPSTREAM_TIMEOUT_S` sets the wait.
+Its default stays the 600 s this relay always waited (a reasoning model answering a non-streaming
+call is silent for minutes), which is far under the runner's own turn cap; an instance with a
+shorter cap of its own, such as one this suite measures with its 600 s per turn, runs with 180. Pinned by `runner/tests/test_relay_upstream_failure.py`, which
+drives the real handler over a real socket against an upstream that drops, drops-then-answers,
+refuses, and goes silent — the defect was in what reaches the client, not in parsing.
+
+**Proven by re-running the tour twice** on a build of this branch, with the nine families around the
+collapse (`kimi-k3, qwen3.8-flash, glm-5.3-flash, mistral-medium-3.5, step-3.7-flash,
+hunyuan-4-preview, nemotron-3.5-lightning, minimax-m3, gpt-5.4-mini`): **8 of 9 both times, no turn
+anywhere near the cap** — every previously-hanging family completed in 9-52 s with its served model
+and the deck. The two non-passes were not hangs and were not the same family twice:
+
+- run 1, `hunyuan-4-preview`: the turn **completed** with `tencent/hy4-preview` and `tour.pptx` — the
+  tour read the record at the instant it said `done`, the gateway's own word for completed
+  (`_RESP_STATUS_MAP`), which is not in the script's RUNNING list, so it settled early on a
+  half-written record. A shared-script bug, below.
+- run 2, `nemotron-3.5-lightning`: a real, reported failure in 113 s — `Runtime completed without a
+  final assistant response`, and the CLI's transcript gives the mechanism: `stopReason: "length"`.
+  The model hit the output cap with no usable final message. That is the blanket
+  `max_completion_tokens: 16384` above, now with a named victim, and it is the same id the matrix
+  found unstable on its own (run1 FIRST failed, run2 RECYCLE failed, run3 clean 5/5).
+
+And the fixed path was exercised end to end on a real instance rather than only in tests: with the
+connection's base URL pointed at a port nothing listens on, a turn fails in 22 s carrying
+`502 the provider did not answer: URLError: <urlopen error [Errno 111] Connection refused>`.
+
+## agentzero: the first matrix run, and the two defects it found (2026-09-28)
+
+A local instance built from the branch (vercel, the 7 cross-harness ids) ran the matrix TWICE: 29/35
+then 30/35. Every one of the 11 failures across 70 scenario executions was ARTIFACT or RECYCLE;
+first / followup / switch were 70 for 70. The failing SCENARIOS were stable while the failing MODELS
+drifted, which is the shape of a defect in the backend rather than model weakness — and both were.
+custom-harness passed, the plugin matrix was 4/4, samemodel.py clean, connection integration:vercel
+throughout.
+
+**ARTIFACT — "no file card (files: none)" while the card said "Edited a file".** The driver has to
+import Agent Zero from the per-workspace base, and it left the process cwd there. Agent Zero resolves
+its OWN paths against that base, but a tool that takes a path FROM THE MODEL does not: text_editor
+writes with a bare `open(path)` (plugins/_text_editor/helpers/file_ops.write_file), so
+"hello-agentzero.txt" landed in `.harness/agentzero/base/` — inside the prefix /produced excludes.
+The models that failed were the ones that passed a RELATIVE path; a model that passed an absolute one,
+or that used the terminal (whose cwd Agent Zero sets itself), passed. Hence "intermittent". The turn
+now runs with the workspace as its cwd. A/B against a scripted provider, same relative write: before,
+the file is in the base and the workspace holds nothing; after, it is in the workspace root.
+
+**RECYCLE — the recall answered the injected greeting.** Agent Zero opens every fresh conversation
+with a FABRICATED exchange: agent_init adds a user message "Hello!"
+(prompts/fw.initial_user_message.md) and an assistant greeting, so its web UI never starts empty. So
+the transcript's first user message was one the person never sent, and "what exact word did I ask you
+to reply with in my very first message" was answered — correctly, for that transcript — with "Hello",
+"Hello!", "none" or "you did not ask me to reply with any specific word". THE HISTORY WAS NEVER LOST:
+reproduced on a local runner with a real checkpoint + hydrate, the recall failed while `ctx_window`
+(Agent Zero's own record of the prompt it sent) held both M1 and M2. The greeting is now overridden
+through the framework's own mechanism — extension classes merge by FILE NAME, first occurrence
+winning, and usr/extensions comes before the bundled ones — by a no-op `_10_initial_message.py`.
+A pin bump that renames the bundled file silently restores the greeting, so the name is pinned by a
+test.
+
+**Proof of the fixes**, on the three models that failed reliably (claude-haiku-4.5, which failed
+recycle in both runs; gemini-3.5-flash-lite and grok-4.20, which failed artifact in both): the five
+scenarios through a local runner, with a real checkpoint and a real /hydrate that wipes the workspace
+and restores it — 3 sequences each, **9 of 9 sequences and 45 of 45 scenarios green**, every artifact
+written through text_editor (the path that used to deliver nothing) and every recall answering its own
+M1 word.
+
+**The disabled tool, measured against a REAL tool.** `disabled_tool_unused` passes vacuously on this
+base as on the others (the shared dimension disables the fixed id `WebSearch`, which no new harness
+has — a maintainer item, not patched around here). Measured directly instead, with
+`code_execution_tool` disabled and a scripted provider that calls it anyway, at all three tool
+sources:
+- **directly**: the tool's whole section leaves the system prompt (23,140 -> 19,116 chars,
+  `code_execution_tool` x7 -> x0), the call is refused before it executes, and no file is written.
+  `input` goes with it (`### input:` present with the shell enabled, absent with it disabled) —
+  it types into the same terminal.
+- **through `parallel`**: the job is refused (`status: error`) and no file is written; enabled, the
+  same job writes it.
+- **through a subordinate** (`call_subordinate`, profile `developer`): refused, no file; enabled, the
+  subordinate writes it. Asked of Agent Zero's own resolver, the policy the driver writes to
+  usr/plugins/_tool_access/config.json reaches all six bundled profiles.
+One honest limit, live on claude-haiku-4.5 with the shell disabled: it delegated to three subordinate
+profiles and then ANSWERED "Darwin" anyway. Nothing ran — the gate above is what the deterministic
+arms prove — the model fabricated the output. A withheld tool is withheld; it does not stop a model
+from claiming its result.
+
+**Cosmetic, fixed in the same pass**: the answer used to name the absolute sandbox path
+(`/data/workspaces/hsess…/fib.py`) because the environment prompt gives the workdir absolutely. The
+prompt now asks for paths relative to the working directory when the agent names a file to the reader;
+on the same fib task the answer became "Created and ran `fib.py` in the workspace". A nudge, not a
+guarantee.
+
+## agentzero: the full catalog, and what the 16 failures were (2026-10-01)
+
+The first full-catalog run (all 52 ids, vercel, stopped at 34 pairs after 25 hours) was 154 of 170
+scenarios. The two earlier defects did not come back — nothing in the run has the artifact or
+recycle shape. The 16 failures were two shapes, and NEITHER is in this backend's own code.
+
+**Shape 2, the hangs (1,732-8,114 s, nine hours of wall clock between them), were the loopback
+relay.** gemini-3.5-flash, gemini-3.5-flash-lite, gemini-3.1-pro-preview, grok-4.5, grok-4.20,
+grok-build-0.1 and muse-spark-1.3 each lost one turn — several of them trivial ones ("Reply with
+exactly: M2-…"). The instance's log says what happened: 16 handler escapes, ten
+`urlopen(req, timeout=600)` and six `IncompleteRead` on `resp.read(4096)` — the relay reading an
+upstream that stopped mid-stream — and NOT ONE `upstream_unavailable`. That is the defect fixed on
+`feat/minimax-harness` in 6c477eb, which is not on main and was not in the build that ran; it is
+cherry-picked here (see the relay section above). **Re-run on the fixed relay, all seven ids, the
+five scenarios each through a local runner with a real checkpoint and hydrate: 35 of 35, every turn
+between 3 and 26 s** — against 1,732-8,114 s for the same ids before. A turn that used to hang now
+either completes or fails in seconds with the provider's own words.
+
+**Shape 1 was the provider returning nothing, five times, and the message said so in the harness's
+private words.** claude-fable-5-1, claude-opus-5 (twice) and muse-spark-1.2 ended with
+`HandledException: Agent stopped after 5 consecutive unusable model responses to prevent further API
+charges.` That is Agent Zero's own guard (extensions/python/message_loop_result/_20_empty_response.py):
+it fires when a completion comes back with NEITHER content NOR reasoning, five times running. Correct
+behaviour — it stops paying — but it names a counter nobody outside the harness can see.
+
+The empty completion has two sources on this channel, and both are now visible instead of silent:
+
+- **A refusal. Vercel spells it `content-filter`; the relay only knew `content_filter`.** Measured
+  2026-10-01: `anthropic/claude-fable-5.1` and `anthropic/claude-opus-5` answered a short probe with
+  two SSE events, no content, no reasoning and `"finish_reason":"content-filter"`. `_FINISH_RE`
+  admitted `[a-z_]` only, so on Vercel the field never matched, `last_finish` stayed empty, and the
+  check that turns a refusal into a stated reason — in the runner since the goose column — could
+  never fire there. A dead check reports success. The pattern now takes both spellings and
+  normalises to one, and a turn that FAILED while the relay saw a content filter reports the
+  provider's refusal rather than the harness's sentence (the slot `_failure_reason` already keeps
+  for a provider's refusal). End to end against an upstream that declines: the same turn that said
+  "Agent stopped after 5 consecutive unusable model responses" now says **"the provider declined the
+  request (finish_reason content_filter)"** in 3 s, with the served model and the 10,000 input tokens
+  those five calls cost both on the record.
+- **A stream that ended with nothing** — the relay defect of shape 2, which leaves the client a
+  truncated body and the harness an empty answer. One of the four, muse-spark-1.2's artifact turn
+  (799 s), has a relay escape inside its own window.
+
+**Not reproduced on the fixed build, and said plainly:** claude-fable-5.1 ran all five scenarios
+green, and claude-opus-5 answered BOTH of its failing payloads — the real system prompt and the real
+transcript, replayed raw — with `finish_reason: stop`. So the refusal is something the provider does
+some of the time, not a property of these scenarios; the fixes above make the next one readable
+rather than preventing it. `max_consecutive_unusable_responses` is deliberately left at upstream's 5:
+the same counter also covers the misformat loop, where another try is often what repairs the turn.
+
+Measured cost of this pass, from the gateway's own credits endpoint before and after: **$1.50**.
+
+
+## The agentzero backend: Agent Zero v2.13 (2026-09-27) — behaviour measured, NO column yet
+
+Agent Zero (agent0ai/agent-zero, MIT) is a framework shipped as a Docker image with a web UI: no CLI,
+no headless mode, no PyPI package, no release assets. `runner/agentzero_driver.py` imports it from
+the tagged source tree (digest-pinned in `install_agentzero`) and runs one message per turn through
+its own `AgentContext.communicate`, the path its `/api_message` endpoint takes. No support-matrix
+column has run on this base; the catalog is openhands' list, offered so the matrix can measure it.
+
+Measured on the pinned v2.13 (macOS for the driver, Linux arm64 `python:3.12-slim` for the install):
+
+- **Provider failures are structural.** A wrong key (401) and a dead base url each raised out of the
+  loop (`HandledException`), with an `error` log item and no response-tool text; no error prose ever
+  reaches the answer, so no prefix regex exists. Through a local runner the wrong-key turn failed in
+  6 s with litellm's sentence as the reason.
+- **An endpoint that never answers held a turn past 900 s** (Agent Zero sets no provider timeout).
+  The driver passes `timeout`/`stream_timeout` 300 s (`HR_AGENTZERO_TIMEOUT`) and collapses three
+  nested retry ladders (the OpenAI client's 2, Agent Zero's 2 transient, its `_error_retry` 1) to
+  four attempts: at a 5 s timeout, 110 s before the reason became 29 s.
+- **The model id reaches the provider unchanged** (loopback recorder): `openai/gpt-6-sol`, `gpt-5.4`,
+  `google/gemini-3.1-flash-lite`, `anthropic/claude-sonnet-4.6` each arrived as sent — the openhands
+  double-strip (#296) does not happen here. One provider call per trivial turn once the
+  always-enabled `_chat_naming` plugin's automatic naming is switched off (it was a second call).
+  The system prompt of a one-word turn is about 25.7 KB; relay usage on the first real turn:
+  13,425 input tokens.
+- **Tool policy is hard**, by Agent Zero's own `_tool_access` plugin (prompt filter + execution gate,
+  which `parallel` goes through too). `input` types into the terminal, so it is withheld with
+  `code_execution_tool`. A disabled MCP tool rides the server's own `disabled_tools`: withheld,
+  asked for anyway, the model answered CANNOT and the token never appeared.
+- **Cancel.** The terminal is a pty bash spawned with `start_new_session=True`; a `nohup … &` it
+  started outlived a group kill until the driver kept the shell in its own group (A/B at a
+  scripted recorder).
+- **Not offered, because they cannot run here:** search_engine (SearXNG only its image runs),
+  document_query and memory (FAISS, local embeddings/torch), browser, scheduler, notify_user,
+  a2a_chat, the A0-connector remote tools. The nodejs runtime of code_execution_tool calls
+  `/exe/node_eval.js`, which exists only in upstream's image — a model that picks it gets an error.
+- **Install**: 83 s, venv 569 MB + source 69 MB (Linux arm64). Over the 300 MB bar and in the default
+  `HR_BACKENDS` all the same — the call aider's review already made (see above): the console offers
+  every base the catalogue lists, so a base outside the default install is a base whose first task
+  fails, and the operator's switch is `HR_BACKENDS` itself.
+- **End to end through a local runner** (Vercel, gemini-3.1-flash-lite, 2026-09-27): a shell call +
+  AGENTS.md codeword, a no-tool recall of the first turn, a skill loaded by `skills_tool` whose
+  script ran, a turn with the shell withheld; every result carried `model` =
+  `google/gemini-3.1-flash-lite` and non-zero relay usage, and neither the key nor the relay token
+  was in the workspace or the turn record.
+
+<!-- Carried onto this branch by cherry-picking 6c477eb from feat/minimax-harness: the relay is
+shared by every backend on that path, and the agentzero full-catalog run of 2026-09-30 hit the same
+defect (ten urlopen timeouts escaping the handler, six truncated chunked reads, no
+upstream_unavailable anywhere in the log). The section below is that commit's own write-up; what it
+changed for this base is under the agentzero heading further down. -->
+
+## agentzero: the "model switch hangs the turn" report, and what the instance actually shows (2026-10-01)
+
+A family tour on a local instance of this branch was 0 of 13 — the first turn completed in 18.3 s and
+every family after it, each a switch to the next family, was `not settled in 600s` with no served
+model, no tool call and no error — and a hand-made three-turn repro (two turns on gpt-5.4-mini, then
+one on claude-sonnet-5) had its third turn still running at 635 s. Read as "a model switch hangs the
+turn".
+
+**On the same instance, same build, same harness, a switch does not hang.** Six shapes, all through
+the product API against mx-agentzero, every one complete in seconds:
+
+| what was driven | result |
+|---|---|
+| trivial turn, same model twice, then a cross-family switch (gpt-5.4-mini -> claude-sonnet-5) | 4.0 / 3.8 / 3.8 s |
+| same-FAMILY switch then cross-family (gpt-5.4-mini -> gpt-5.4 -> claude-sonnet-5) | all completed |
+| the tour's own first turn (build tour.pptx) then a cross-family switch asking for its first edit | 15.0 s then 16.1 s |
+| a turn cancelled mid-flight, then a cross-family switch in the same session | 5.0 s |
+| the CONSOLE's own request shape (stream:true, metadata.model + session_id, backend), two switches | 5.1 / 3.8 / 3.7 s |
+| a second turn started while another is still in flight in the same session | 3.9 s |
+
+So the question the report asks — any switch, or only a cross-family one — is answered: **neither
+hangs**. Whatever stalled those turns is not the model id changing.
+
+**What the hung turns left behind says where they stopped.** The tour workspace's console log — the
+file this driver points Agent Zero's own stdout and stderr at — is **0 bytes, with its mtime at the
+start of the last hung turn**. The driver got as far as opening that file and then printed nothing:
+no framework banner, no init event, no provider call. Import measured from that same workspace, as
+that session's uid, today: **1.7 s**. So the stall is before the agent loop, which also fits the cost
+— the whole 13-family tour, every turn capped at 600 s, cost $0.4153.
+
+**One lifecycle hazard was found, and it is real.** The gateway starts the next turn of a session
+without stopping a turn still in flight: measured here, a second turn completed in 3.9 s while the
+first was still running its shell, the session's status moved on to the newcomer, and the orphan was
+still alive 164 s later (it runs to the runner's own `MAX_TURN_SECONDS`). Two Agent Zero processes
+then share one workspace — and both write this base's per-turn files. Made safe on this branch
+rather than left to chance: every per-turn file is now written to a temp name and renamed (a
+truncate-then-write let the other process import an EMPTY extension module and lose that turn's tool
+cards without a word), and the console log is per turn PROCESS rather than one shared name opened
+with O_TRUNC — which is how a hung turn comes to leave a 0-byte log behind.
+
+**Not established, and not claimed:** what the driver was waiting on during those 600 s. The
+instrument for the next occurrence is in place and costs nothing: the per-turn console log, plus
+`ps` inside the container while the turn is still hung. One agentzero turn is **275 MB RSS** (peak,
+measured on a 4 GB container), which bounds how many can usefully run at once.
+
+## The gpt-6 line: sol and luna beside astra (2026-09-27)
+
+Richard asked whether gpt-6-sol was available and for the line to be expanded at list price on every
+harness that can run it. Read the same day: OpenAI's pricing page names gpt-6-astra, gpt-6-sol and
+gpt-6-luna and no terra; Azure's catalog has sol and luna at model version 2026-09-22 (deployed on
+our resource that day, GlobalStandard, beside astra's 2026-09-03 deployment); OpenRouter, TokenRouter,
+Vercel and llmtr list both as `openai/<id>` (OpenRouter and TokenRouter added them on 2026-09-22).
+List prices per 1M tokens, no markup: sol $2 in, $0.20 cached, $2.50 cache write, $10 out; luna
+$0.10, $0.01, $0.125, $0.50; astra $10, $1, $12.50, $50; above 272k prompt tokens input and cached
+input double and output is 1.5x, the rule the gpt-5.x line carries. Batch and Flex are half, fast
+mode double.
+
+**What decides which bases offer them.** OpenAI refuses function tools on /v1/chat/completions for
+the whole line unless `reasoning_effort` is `none` ("Function tools with reasoning_effort are not
+supported for gpt-6-sol in /v1/chat/completions. To use function tools, use /v1/responses or set
+reasoning_effort to 'none'", TokenRouter, 2026-09-27). sol and luna take `none` and then answer with
+a tool call (2.8 s and 1.8 s); the runner's relay already retries on exactly that sentence and
+remembers the fix per model, so the chat-only bases (aider, kimi, openhands, cheetahclaws, qwen,
+cline) run them the way they run the gpt-5.6 line. astra does not take `none` ("Supported values
+are: 'low', 'medium', 'high', and 'xhigh'"), so it stays on the Responses bases alone. Both sol and
+luna describe a red PNG as "Red", so hermes's vision auditing may use them. 0.25.4 carries all of
+it (#295); a model-support extension is a patch release, Richard's rule.
+
+**The columns.** One per connection on hr-test, the four ids routed at that connection through the
+model map and put back afterwards, twelve bases (codex, hermes, dsh, opencode, pi, omp, aider, kimi,
+openhands, cheetahclaws, qwen, cline; goose waits for cline's rows, which are what its list mirrors;
+systemone never), all five scenarios, `EXPECT_CONNECTION` set so a turn served elsewhere is a finding.
+cheetahclaws is wired to OpenRouter, TokenRouter and Vercel only, so its OpenAI and Azure rows are
+not run by design.
+
+**Results (0.25.4, one retest of every miss on the 0.25.5 candidate, the same code as 0.25.5):**
+146 pairs, 727 of 730 scenario runs.
+
+| Column | Pairs | After the retest | First run | What missed the first time |
+|---|---|---|---|---|
+| tokenrouter | 30 | 150 of 150 | 136 of 142 | openhands on both ids (the prefix defect below); gpt-6-luna's recycle recall on codex, hermes and qwen; gpt-6-luna's artifact on aider |
+| openrouter | 30 | 149 of 150 | 149 of 150 | aider x gpt-6-sol recycle, reproduced |
+| vercel | 30 | 150 of 150 | 148 of 150 | gpt-6-luna's recycle recall on codex and on aider |
+| openai | 28 | 139 of 140 | 139 of 140 | codex x gpt-6-luna recycle, reproduced |
+| azure-e2 | 28 | 139 of 140 | 138 of 140 | gpt-6-luna's recycle recall on codex (passed the retest) and on aider (reproduced) |
+
+Every gpt-6-astra pair passes on the six Responses bases on all five connections (30 pairs). Every
+gpt-6-sol and gpt-6-luna first, follow-up, switch and artifact scenario passes on every base and
+connection that ran; the three misses that stand are all the recycle recall, below. openhands
+passed on all five connections after the fix, rerun through the agent server, not the recorder.
+cheetahclaws has no OpenAI or Azure rows: the map's fall-through served its turns on a TokenRouter
+integration when the column's connection cannot drive it, and a pair served elsewhere is not a
+row for that column, so the bullet says not wired. Azure serves the ids as `gpt-6-sol-2026-09-22`
+and the aggregators as `openai/<id>`; both are the provider's alias of the same model, noted, not
+substitutions.
+
+- **openhands sent a bare id to TokenRouter** (fixed in 0.25.5). The builder prefixed the model
+  with `openai/`, and that prefix is taken off twice between the job and the wire (OpenHands' LLM
+  and litellm 1.94.3 each strip one), so an aggregator's `openai/gpt-6-sol` reached TokenRouter as
+  `gpt-6-sol`, refused with `503 model_not_found: No available channel for model gpt-6-sol under
+  group default`. OpenRouter and Vercel resolve a bare OpenAI id, which is why the earlier Vercel
+  column and this run's OpenRouter and Vercel rows passed, and openhands had never been measured
+  on TokenRouter. Measured against a loopback recorder in the openhands venv: `litellm_proxy/<id>`
+  is taken off once and the rest sent as it is, so the builder uses that prefix; and because
+  litellm's proxy provider reads LITELLM_PROXY_API_BASE and LITELLM_PROXY_API_KEY (its Responses
+  path does not fall back to the OpenAI pair: "api_base not set for LiteLLM Proxy responses API",
+  the first hosted turn on gpt-5.4, whose api_mode resolves to responses), the driver hands it
+  that pair and no other. Same fix on hosted (56308ad9), where openhands then passed the family
+  tour on the platform channel with receipts at list price.
+- **gpt-6-luna's recall after a recycle on codex.** The recycle scenario asks, after the sandbox
+  is recycled and the thread resumed, for the codeword of the task's first message; luna answered
+  the harness's completion phrase ("CODEX DONE") instead, first time on four of five connections,
+  twice on OpenAI direct, and passed the retest on TokenRouter, Vercel and Azure. hermes and qwen
+  did it once each on TokenRouter and passed the retest. The turn completes and the thread is
+  intact (the same question on gpt-6-sol and astra is answered everywhere), so this is the
+  cheapest tier's recall, recorded as FAIL where it reproduced and the model stays offered.
+- **aider answers nothing after the restore, sometimes.** aider's recycle resumes with its own
+  chat history; on the gpt-6 line it answered the recall with no text at all ("AIDER None") on
+  gpt-6-sol twice on OpenRouter, on gpt-6-luna twice on Azure, and once each on TokenRouter and
+  Vercel (passed the retest). Every other aider scenario passes on every connection. An open item
+  on aider's restore path with this line, not a catalog change.
+- **The console opened on a placeholder default** (fixed in 0.25.5, hosted b71f427b ported):
+  the placeholder lists and defaults in the console are regenerated from the gateway's catalog
+  byte for byte, the default helper reads the server's answer before the placeholder and never a
+  list's first entry, and a test fails the suite when the lists drift. Measured on the candidate:
+  a fresh page on codex, hermes, claude-code, omp, openhands, aider, kimi and dsh opens on the
+  gateway's default.
+- The 0.25.5 candidate was built from the branch so the openhands rerun could be measured end to
+  end before the tag; 0.25.5 is the same code from main, and the candidate's image and tag were
+  removed after the swap.
+
+**goose (0.25.6).** goose's list is the set of paths cline's rows earned, and cline passed both ids
+on every connection, so 0.25.6 lists gpt-6-sol and gpt-6-luna on goose and its own ten pairs ran
+the same way: 50 of 50 after one retest (first run 48 of 50: gpt-6-luna's recycle recall on
+Vercel and gpt-6-sol's on OpenAI, both answering "GOOSE DONE", both passing the retest). The
+same recall flake as above, on the base that resumes through the relay like cline does.
+
+## The browser column (2026-09-27)
+
+Every base but System One drives the browser plugin on one task in plain words: "Open
+https://example.com/ in the browser, click the only link on that page, and reply with the URL and
+the title of the page you land on." A base passes when the task completed, the trace shows the
+browser navigating and clicking, the answer names iana.org (where the link goes), and the browser
+session was stopped and billed. Runner: `scripts/support-matrix/plugs/browser.py`; the table is
+the Browser section of support-matrix.md, rendered from docs/browser-column.json.
+
+**Result: 15 of 15 on 0.25.7-rc.17, first try, 27 to 52 seconds a base, one browser minute each.**
+
+The baseline on rc.14, before any change, was 5 of 15 (codex, claude-code, pi, omp, dsh), and
+three defects stood between it and the result, each measured on its own build:
+
+1. **A Browser section in the agent's doc (rc.15).** Codex 0.154 keeps MCP tools behind its tool
+   search and opened a page with web search and curl while the console's Browser card stayed
+   empty; hermes fetched the page its own way, and cheetahclaws and opencode obeyed the prompt's
+   "do not visit any other site" instead of following the link (which leads to iana.org). A
+   harness that includes the browser plugin now gets a Browser section in AGENTS.md / CLAUDE.md,
+   the file its own instructions go to: the tools by name, that the person is watching, never
+   curl or a web search instead, look the tools up if they are deferred. The prompt lost the ban
+   and names "the only link" rather than its wording, which example.com changes ("More
+   information..." one week, "Learn more" the next). On rc.15 the seven bases that already had
+   the tools passed 7 of 7.
+2. **One header helper for every MCP writer (rc.16).** goose, opencode, aider, kimi, qwen,
+   gemini, openhands and cline had no browser at all: their MCP writers passed a server's
+   declared headers and dropped its `auth`, so the plugs server, whose credential the gateway
+   mints per turn, answered 401 (openhands said so; kimi said the server could not be reached;
+   the rest said they had no browser). claude, codex, pi, omp and hermes each carried their own
+   copy of the auth handling and worked. `_mcp_headers` in runner/server.py is now the one place
+   a server's headers come from, for every writer and the bridge. 14 of 15 on rc.16.
+3. **Tool names are `plug_tool` (rc.17).** openhands reached the browser and the turn died on the
+   Responses API's "Invalid 'input[3].name': string does not match pattern '^[a-zA-Z0-9_-]+$'":
+   the plugs server named its tools browser.navigate, github.get_file_contents and so on. Claude
+   Code, Codex and pi rewrite an MCP tool's name before offering it; OpenHands passes it through,
+   and neither OpenAI's nor Anthropic's function-name rule allows a dot. 15 of 15 on rc.17.
+
+Tools seen per base differ by style, not by ability: some snapshot before clicking, some read the
+URL after, cline waits for the load; every one navigated and clicked through the plugin.
+
+## The bugfix round of 2026-09-28: 0.25.13 to 0.25.15
+
+Three releases carried the contributor PRs and what verifying them on hr-test turned up. 0.25.13
+(c0ebe8c) is #265, #270, #285, #286, #290, #291, #292, #312 and #314; 0.25.14 is the Starter Kits
+page from the console design (#313); 0.25.15 is #315 and #316, the two fixes below. Every release
+was swapped onto hr-test with the fresh-volume check and the checks here were run against the
+container by the API and the console.
+
+**openhands x claude-opus-5 still failed on 0.25.13, with #312 in it.** The turn ended in 16 s
+with TokenRouter's refusal of the thinking shape ('"thinking.type: enabled" is not supported for
+this model. Use "thinking.type: adaptive"'). #312 put the retry in the broker, which is the path
+brokered traffic takes; a self-hosted install in owner trust sends the sandbox's request through
+the runner RELAY (`[relay] provider refused ...` in the container log), which has its own ladder of
+"the provider named the fix" retries and had no rung for this one. #315 adds it: the relay drops
+`reasoning_effort` for that model on that route, remembers it, and sends again at the model's own
+default. On 0.25.15 the same turn completes in 16 s.
+
+**The aider row of the browser column failed four times on 0.25.13, with #314 in it.** Each trace
+was a reply that announced work and did none, which is what the driver's once-per-turn nudge is
+for, and each slipped past it: "I’ll open the page in the browser" (gpt-5.4 writes the
+typographic apostrophe; the regex knew only the straight one), "I need to use the browser for
+this, not edit any files" (a need stated instead of met), and "To complete the task, I still need
+to click the link" as a paragraph after the first browser output. A fourth run clicked with a
+selector that timed out and navigated to the destination instead, which the column does not count
+as a click. #316 lets the nudge match either apostrophe and a stated need, and adds the
+stops-short paragraph. On 0.25.15 aider passes in 27 s and openhands in 34 s (open, navigate,
+click, get_url; the answer names the iana.org page; the session's stop row is billed). goose (28 s)
+and openhands (40 s) had passed on 0.25.13 as well, and the CSV preview of #292 was checked there
+through the console: three logical rows, a quoted comma, a doubled quote and a newline kept in one
+cell.
+
+**Reading a failed row.** `plugs/browser.py --bases <base> --keep --out row.json` leaves the harness
+in place and writes the session id; `GET /v1/traces/{sid}/all?compact=0` is the trace, one JSON
+object per line, and `GET /v1/sessions?limit=N` lists the recent sessions when the id was not
+kept. A hosted install has the broker path only; the relay finding is the self-hosted image's.
+
+## Environments column (2026-09-29, 0.26.11 and 0.26.12)
+
+`scripts/support-matrix/environments/column.py`: every base but System One runs three tasks on one
+environment (`proof-studio-57543`: tabulate from pip, qrcode from npm, jq from apt, built once), each
+task in its base's default model, judged by the server's record: the turn completed, the trace holds
+no install command, the answer shows the package used from the environment (its path under the mount
+or the store, the command's output), and the session names the environment.
+
+| base | pip (tabulate) | npm (qrcode) | apt (jq) | install commands | seconds |
+|---|---|---|---|---:|---:|
+| codex | pass | pass | pass | 0 | 54 |
+| claude-code | pass | pass | pass | 0 | 43 |
+| hermes | pass | pass | pass | 0 | 98 |
+| pi | pass | pass | pass | 0 | 37 |
+| omp | pass | pass | pass | 0 | 75 |
+| dsh | pass | pass | pass | 0 | 97 |
+| goose | pass | pass | pass | 0 | 53 |
+| opencode | pass | pass | pass | 0 | 54 |
+| aider | pass | pass | pass | 0 | 53 |
+| kimi | pass | pass | pass | 0 | 72 |
+| openhands | pass | pass | pass | 0 | 78 |
+| cheetahclaws | pass | pass | pass | 0 | 53 |
+| qwen | pass | pass | pass | 0 | 48 |
+| gemini | pass | pass | pass | 0 | 47 |
+| cline | pass | pass | pass | 0 | 37 |
+
+15 of 15 bases; 45 of 45 tasks; every task one command, no install anywhere. The
+first pass judged three answers by their labels rather than their evidence (aider paraphrases the
+printed lines; omp's shell reports `jq --version` as jaq while `which jq` and the sorted output are the
+environment's); the judges now read the evidence, and the two bases rerun clean on 0.26.12.
+
+## gpt-6.1-sol (2026-10-02, 0.28.7)
+
+Richard asked for GPT-6.1 Sol on every harness that can run it, in the matrix, at list price, on both
+trees. Read the same day: OpenAI's pricing page names gpt-6.1-sol (released 2026-09-29; no 6.1 astra or
+luna yet) at $2 in / $10 out per 1M, cached input $0.10 (half of gpt-6-sol's $0.20), cache write $2.50,
+and above 272k prompt tokens $4 / $15 (cached $0.20, write $5); 1,050,000 context, 128k output.
+OpenRouter, TokenRouter, Vercel and llmtr list it as `openai/gpt-6.1-sol` (OpenRouter also a `-pro`,
+Vercel also a `-fast`; neither is carried); Azure's catalog names it at model version 2026-09-29. It is
+offered wherever gpt-6-sol is, newest first in the OpenAI family, and it sees images.
+
+**Where it runs.** Unlike gpt-6-sol and gpt-6-luna it refuses `reasoning_effort: "none"` ("Supported
+values are: 'low', 'medium', 'high', and 'xhigh'"), so the relay's none-retry that lets the chat-only
+bases call function tools on /v1/chat/completions does not help it. What decides is the channel: a
+connection that passes chat/completions through refuses the first turn on the chat-only bases, while an
+aggregator that translates chat completions with tools into OpenAI's Responses API upstream serves every
+base, and aider (no function tools) runs it everywhere. openhands reaches OpenAI direct and Azure through
+litellm's Responses path and fails only on TokenRouter. As with the gpt-5.6 line on qwen and cline, a
+row measured working on a path stays listed and the catalog comment names the connections that refuse
+it; no base refused it on every connection, so none left the catalog. It is not Responses-only (aider
+runs it), so RESPONSES_ONLY_MODELS is unchanged.
+
+**Measured** (0.28.7-rc.1 and rc.2 on hr-test, Playwright through the console, one column per
+connection, five scenarios per pair: first, follow-up, switch to gpt-6-sol on the same connection,
+artifact, recall after recycle; the console's switch partner stays on the column's connection):
+
+| connection | bases listed | pairs | scenario runs | refused the first turn |
+|---|---:|---:|---:|---|
+| TokenRouter (sponsorship) | 13 | 8 of 13 | 40 of 40 on the passing pairs | kimi, openhands, cheetahclaws, qwen, cline |
+| OpenRouter | 13 | 13 of 13 | 65 of 65 | none |
+| Vercel AI Gateway | 13 | 13 of 13 | 65 of 65 | none |
+| OpenAI (direct) | 12 (cheetahclaws not wired) | 9 of 12 | 45 of 45 on the passing pairs | kimi, qwen, cline |
+| Azure OpenAI | 12 (cheetahclaws not wired) | 9 of 12 | 45 of 45 on the passing pairs | kimi, qwen, cline |
+
+goose, measured on its own pairs as it was for gpt-6-sol (rc.2, goose in the catalog): five of five connections, 25 of 25 scenario runs, TokenRouter included, so goose carries it.
+
+Runner failures, not model results: four workers lost their headless browser mid-run ("Target page,
+context or browser has been closed": qwen on TokenRouter at its first turn, hermes at its follow-up and
+kimi on Vercel, the Azure worker after aider); each pair was re-measured one worker at a time and the
+table carries the re-measurement (hermes on Vercel: "the session never opened a turn in 120 s" on the
+crashed worker, five of five on the rerun).
+
+**Family tour** (`FAMILIES=gpt-6.1-sol,gpt-6-sol`: one deck conversation per base handed into
+gpt-6.1-sol and on to gpt-6-sol, under the OpenRouter route): codex, hermes, pi, omp, dsh, opencode, kimi,
+openhands, cheetahclaws, qwen and cline passed, 2 of 2 families each in one conversation; aider aborted
+its own first turn twice (13 s, no deck before any switch, its trait since 2026-09-30 and the same on hosted that day); its pair rows pass five of five on every connection, so the model stays listed on aider and the tour's aider first turn stays the open aider item it was.
+
+**Finding, not this model's.** codex, dsh, omp and cline turns carry no `served_model` on this box on any
+connection (a probe on codex with gpt-6-sol answers unlabelled too), so their rows read "turn(s)
+unlabelled" by the rule of 2026-09-30; aider, opencode, pi, openhands, hermes (on three of five
+connections), kimi, qwen and cheetahclaws label theirs. The relay's label is not read on those bases'
+paths: a follow-up, outside this column.
+
+**The record store.** The gpt-6 line's columns (#297, #299) were rendered from records never committed,
+so the Claude Sonnet 5.5 column's regeneration (#351) dropped 175 of their rows from the table. The 149
+rows the store lacked are restored from the document as it stood at #297, marked `reconstructed`, so
+the table says again what was measured then.
+
+**Hosted cross-check** (the HarnessRouter session, same day): on the platform channel the seven
+Responses-capable bases plus aider passed 35 of 35 with the five chat-only bases' first-turn 400 kept
+as evidence; OpenRouter 12 of 12, 48 of 48; Vercel 7 of 7, 35 of 35; tours pass on codex, hermes, dsh,
+pi, omp and opencode (third attempt, a sandbox carry flake), aider aborts on its own first turn as
+before. The hosted platform then took OpenRouter as the route for this model, so its catalog lists the
+same twelve bases as this one; its comment keeps the TokenRouter and direct-OpenAI refusal for
+organizations that bring such a key, the rule the self-hosted catalog states.
+
+## The minimax backend: MiniMax Code 0.5.4 — behaviour measured, columns NOT yet run (2026-09-26/27)
+
+No `minimax` column exists in `docs/support-matrix.md`: a column needs a deployed instance running
+one provider at a time. What was measured, on the 0.5.4 release archive (`mcode --version` = 0.5.4):
+
+- **Through a local runner** (this branch, macOS arm64, real providers): minimax-m3 and gpt-5.4-mini
+  on Vercel, gemini-3.5-flash-lite on Google, each served as itself per the relay (`minimax/minimax-m3`,
+  `openai/gpt-5.4-mini`, `gemini-3.5-flash-lite`), relay usage non-zero on every turn; a bash tool call
+  rendered as tool_use/tool_result; a follow-up recalled a number from the first turn through
+  `--session`; the harness instructions (global `AGENTS.md`) reached the model; a stdio MCP server's
+  tool was called with bash disabled and bash absent; a cancel during `sleep 241` left no process
+  behind; no provider key in the CLI's argv, the agent shell's environment or the workspace.
+- **Provider failures are structural** (invalid key, 401/503 at a stub and a real Vercel 401):
+  `turn.failed` with the provider's sentence, exit 4, nothing narrated as assistant text.
+- **The retry storm has no off switch, and that was established by walking the surface, not assumed.**
+  0.5.4 retries EVERY error class five times — 6 upstream requests, measured at a stub for 401, 429 and
+  503 — so a bad key is reported after 20-28 s. `DEFAULT_LLM_RETRY_POLICY` is
+  `{maxRetries 5, baseDelayMs 1000, maxDelayMs 30000, maxRetryElapsedMs 120000}`, and the elapsed cap
+  bounds the worst case: a 429 answered with `Retry-After: 90` still ended in 23 s, because
+  `retryDelayMs` clamps Retry-After to `maxDelayMs` and the loop stops once the next delay would pass
+  the 120 s window. What was checked, so nobody redoes it: (1) the config schema —
+  `packages/config/src/config.ts`'s top-level parse is a whitelist of `parse*` calls that IGNORES
+  unknown keys, and the only retry/timeout-ish keys in the whole schema are
+  `goal.{subagent,evaluator}.{timeoutSeconds,maxRetries}` (goal-mode evaluation, not LLM transport),
+  `permission.classifierTimeoutMs`, `tui.*.timeoutMs` and `ProviderOptions.{timeout,chunkTimeout}`,
+  whose consumer is not in the published tree; (2) the 131 `process.env.*` names in the shipped
+  bundle — none retry-, backoff- or timeout-related; (3) every flag of every subcommand on the pinned
+  binary — only `exec --timeout`, a whole-run cap; (4) the code path — `withLLMRetry(inner, {policy?})`
+  is the single hook and BOTH hosts pass no policy (`resolveLlmRetry: () => ({ observer })`,
+  local-runtime-v2 `services.ts`; `llmRetry: { observer }`, local-runtime `host.ts`), so the default
+  always applies and `policy` is reachable only by an embedder. Measured negatives: a top-level
+  `llmRetry: {maxRetries: 0}`, `custom_provider.<id>.options.maxRetries: 0` and
+  `options.{timeout,chunkTimeout}` each left the count at 6 requests.
+  **`exec --timeout` is NOT used to bound it**, and that is deliberate: `--timeout 8s` against the 401
+  stub did cut the run to 4 requests, but the record became `status: timeout` with an EMPTY error
+  message — the provider's 401 sentence was gone. A bounded turn that cannot say why it failed is
+  worse than a slow one that can.
+- **Cost channel:** a trivial first turn is ~9k input tokens on minimax-m3 (most cached on Vercel) and
+  ~17k on Google (no cache there). MCP tools, bundled skills, web search and website deploy are off
+  or withheld, which halved the system prompt measured at a stub (14.7k -> 7.8k characters).
+- The CLI fetches a public model catalog once per run (`models.dev`, with `MAVIS_REGION=en`); no
+  login, telemetry or update check happens in `exec`.
+### The browser column's `0 of 1` is the instance's missing key, not the base (2026-09-29)
+
+`plugs/browser.py` reported `0 of 1 bases drive the browser` for minimax, twice, with
+`no browser navigate/click in the trace (no browser tool at all)`. Every link of the chain was
+checked on a build of this branch rather than inferred from that sentence, and **every one of them
+works**:
+
+- the runner wrote the `plugs` server into `$MINIMAX_DATA_DIR/mcp.json` as `type: http` with the
+  per-turn bearer in `Authorization`;
+- the gateway's Browser section reached the agent's doc (the global `AGENTS.md` this base uses),
+  naming all thirteen tools;
+- the CLI connected and **the request carried all thirteen** `mcp__plugs__browser_*` tools
+  (its own `llm-call.json`);
+- **the model called them** — `browser_navigate` then `browser_get_url` (its own transcript).
+
+What came back: `"The browser service is not set up on this deployment. Tell the person."`, which is
+`gateway/app.py`'s own refusal when `browser_plane.configured()` is false — the instance has no
+`BROWSER_USE_API_KEY`, exactly as `plugs/browser.py`'s docstring says ("without it every base
+reports the refusal it got"). The model then told the person, which is the right answer to a browser
+that is not there.
+
+**Established before anything else, because a column with one base cannot say whose defect it is:**
+a second base on the same build, instance and model — `qwen`, one of the fifteen that passed this
+column 15 of 15 on rc.17 — fails **identically**, with the same refusal in its answer. So this is not
+this base's defect and not this PR's.
+
+The trace had the evidence all along: two `plug` rows, `outcome: refused`, `error: "not configured"`,
+for `navigate` and `get_url`. The column counts only rows whose outcome is `ok`, so it rendered two
+refused calls as *"no browser tool at all"* — the opposite of what happened, and the reason two people
+went looking for a missing-tools defect. A maintainer item, below.
+
+Separately, and because a copy that agrees today drifts tomorrow: this base's MCP writer now takes a
+server's headers from `_mcp_headers`, the one helper every writer and the bridge share, instead of
+its own inline copy of the same three lines. Its own copy was correct — the bearer is in the file and
+the server accepted it — but eight writers that kept their own copy are why the browser column was
+5 of 15 before rc.16.
+
+### The family tour's seven silent failures were the relay, not the context window (2026-09-29)
+
+The first tour on this base passed 7 of 14 families in one conversation: every family from kimi-k3
+on was recorded `not settled in 600s, stopped (cancelled)` with **no served model, no tool call and
+no reason** — except `glm-5.3-flash`, which passed in 12 s in the middle of the collapse. The
+obvious reading was the blanket 200k context window (above): a history too large for a model's real
+window. **It was not**, and two measurements say so. The conversation at its largest was 219 KB of
+messages plus a 12 KB system prompt and 27 KB of tool schemas — about 65k tokens, under the real
+window of every failing model — and the same families pass on that same session today, with a
+longer history (kimi-k3, qwen3.8-flash and minimax-m3 each re-run by hand, all completed in
+seconds). A conversation too long fails monotonically; this did not.
+
+**It was the loopback relay answering nothing when the provider answered nothing**, in two ways,
+both in `_forward`:
+
+- The upstream call caught only `urllib.error.HTTPError`. A refused connection, one dropped
+  mid-request, or a provider gone silent raised out of the handler; `ThreadingHTTPServer` printed a
+  traceback and closed the client socket **with no HTTP response at all**. The instance's log holds
+  ten of those (`http.client.RemoteDisconnected: Remote end closed connection without response`),
+  two inside the tour's failing window.
+- The relay's own wait was 600 s — the same as the cap above it — so a provider that accepted a
+  request and then went silent could never be REPORTED by the relay: the cap always fired first and
+  the turn was recorded as cancelled with nothing in it. That is the shape of six of the seven.
+
+Both are fixed in `runner/server.py`: transport failures now answer **502** (refused or dropped) or
+**504** (timed out) with `{"error":{"code":"upstream_unavailable",…}}` carrying the provider's own
+failure; a bare drop before any byte is retried once and a timeout is never retried (the provider
+may be generating, and a second request is a second bill); a stream that stops mid-answer carries
+the reason as its own error event and is left unterminated, and a body that stops arriving is a 502
+or 504, so neither reads as a complete answer; and `HR_RELAY_UPSTREAM_TIMEOUT_S` sets the wait.
+Its default stays the 600 s this relay always waited (a reasoning model answering a non-streaming
+call is silent for minutes), which is far under the runner's own turn cap; an instance with a
+shorter cap of its own, such as one this suite measures with its 600 s per turn, runs with 180. Pinned by `runner/tests/test_relay_upstream_failure.py`, which
+drives the real handler over a real socket against an upstream that drops, drops-then-answers,
+refuses, and goes silent — the defect was in what reaches the client, not in parsing.
+
+**Proven by re-running the tour twice** on a build of this branch, with the nine families around the
+collapse (`kimi-k3, qwen3.8-flash, glm-5.3-flash, mistral-medium-3.5, step-3.7-flash,
+hunyuan-4-preview, nemotron-3.5-lightning, minimax-m3, gpt-5.4-mini`): **8 of 9 both times, no turn
+anywhere near the cap** — every previously-hanging family completed in 9-52 s with its served model
+and the deck. The two non-passes were not hangs and were not the same family twice:
+
+- run 1, `hunyuan-4-preview`: the turn **completed** with `tencent/hy4-preview` and `tour.pptx` — the
+  tour read the record at the instant it said `done`, the gateway's own word for completed
+  (`_RESP_STATUS_MAP`), which is not in the script's RUNNING list, so it settled early on a
+  half-written record. A shared-script bug, below.
+- run 2, `nemotron-3.5-lightning`: a real, reported failure in 113 s — `Runtime completed without a
+  final assistant response`, and the CLI's transcript gives the mechanism: `stopReason: "length"`.
+  The model hit the output cap with no usable final message. That is the blanket
+  `max_completion_tokens: 16384` above, now with a named victim, and it is the same id the matrix
+  found unstable on its own (run1 FIRST failed, run2 RECYCLE failed, run3 clean 5/5).
+
+And the fixed path was exercised end to end on a real instance rather than only in tests: with the
+connection's base URL pointed at a port nothing listens on, a turn fails in 22 s carrying
+`502 the provider did not answer: URLError: <urlopen error [Errno 111] Connection refused>`.
+
+### The disabled-tool claim, measured against `bash` (2026-09-28)
+
+`disabled_tool_unused` passes VACUOUSLY on this base, as it does on kilo, qwen, gemini, cline, kimi
+and aider: the shared dimension disables the fixed id `WebSearch` and none of them has a tool by that
+name. So it was measured directly instead, with an oracle no answer can fake — `HR_MX_STAMP` set in
+the TURN'S ENVIRONMENT and never in the prompt, the task being to write that value into a file. Only
+a process that ran with the turn's environment can produce it.
+
+- **Control** (all tools): `bash` called, the stamp lands in the file. **Treatment** (`bash`
+  disabled): the CLI sends 11 tools with no shell among them — `edit get_goal glob grep read skill
+  task_stop todowrite update_goal web_fetch write`, read off its own `llm-call.json` — and the stamp
+  appears in NO file in the workspace. Repeated on `minimax-m3` and on `gpt-5.4-mini` under explicit
+  pressure to try every tool, delegate and spawn.
+- **BOTH ERROR DIRECTIONS.** Neither model came back empty-handed: one wrote `proof.txt` containing
+  `HR_MX_STAMP: <unavailable>`, the other `<unresolved>`. A file-existence oracle would have reported
+  a shell escape that never happened. Disabling `bash` withholds EXECUTION; it does not withhold file
+  writing (`write`/`edit` stay) and it does not withhold network egress (`web_fetch` stays — it even
+  answered a loopback HTTP beacon in the treatment arm, which is why a beacon is not a sound witness
+  of "a shell ran" and the env stamp is).
+- **The subagent is a genuine second door, and closing it is load-bearing.** With `bash` withheld but
+  `features.delegation` left ON, the agent called `task`, the subagent had a shell, and the file came
+  back holding the env stamp. So a subagent does not inherit the main agent's denial: withholding the
+  named tool alone would have left `tool_enforcement: "hard"` false. That is why the runner turns
+  delegation off whenever anything is withheld — a positive control for the line, not decoration.
+  (In that run the model's prose denied having env access while the stamp sat in the file: narration
+  is not evidence in either direction.)
+- **"The script actually ran" is fakeable.** A skill whose `SKILL.md` says to run `scripts/stamp.py`,
+  the script holding its own token and writing `$HR_MX_STAMP`: with the shell withheld the agent read
+  the script and hand-wrote `stamp.txt` as `SKILLTOK-8842QF|<no-env>`. The bundle's token is there, so
+  a claim keyed on it passes with no execution; the env stamp is absent, which is what proves nothing
+  ran. This settles the question the kimi work left open — as judged today that claim is judged by
+  something an agent can fake, and an env stamp is the cheapest form it cannot.
+
+- **The output cap and the context window DO have a hook, unlike the retries.** Every request carries
+  `max_completion_tokens: 16384` and an unknown model's window defaults to 200,000 — the CLI's
+  unknown-model defaults, since the runner sets neither per id (kimi's `KIMI_CONTEXT_WINDOW` question).
+  Measured: with `custom_provider.<id>.models.<model>.limit: {context: 32768, output: 4096}` the same
+  request carried `max_completion_tokens: 4096`, so a per-id table would work whenever there are
+  measured windows to put in it.
+
+## The kilo backend: Kilo CLI 7.8.1 (2026-09-26/27) — behaviour measured, NO column yet
+
+Kilo CLI (Kilo-Org/kilocode, MIT) is an opencode fork (its README says so; `packages/opencode` in
+the monorepo), and the runner treats it as one: opencode's `run --format json` events, provider
+block, MCP map and `skills.paths` are unchanged at 7.8.1, so `_build_kilo` reuses opencode's package
+choice, MCP translation and normaliser. There is **no matrix column**: this backend has not been run
+on a deployed instance. What follows was measured on the pinned binary (darwin-arm64 build of the
+same release for the local runs, `kilo --version` = `7.8.1`), against a logging stub and, for three
+turns, through a locally started runner on Vercel.
+
+**Where it differs from opencode, each measured:**
+
+- **It phones home unless told not to.** A turn whose provider was on 127.0.0.1 made CONNECTs to
+  `us.i.posthog.com` (telemetry, x2), `models.dev` (catalog, x1) and `api.kilo.ai` (Kilo's gateway
+  provider, x2), logged at a refusing proxy. `KILO_TELEMETRY_LEVEL=off` and
+  `KILO_DISABLE_MODELS_FETCH=1` removed the first two; `"enabled_providers": ["hr"]` in the config
+  removed the third — zero egress besides the provider. The control arm (defaults) is what shows the
+  proxy sees these calls at all. No Kilo login is needed for anything the runner does.
+- **Scheduling tools that promise a later turn** (`schedule_wakeup`, `cancel_wakeup`, `cron_*`,
+  `goal`: "the harness resumes this session with the prompt you give it"). Every turn here is one
+  process the gateway starts, so the runner denies them on every turn.
+- **`write` and `apply_patch` are gated by the `edit` key.** Measured at the stub: denying `write`
+  left `write` and `apply_patch` in the request; denying `edit` removed all three. The catalog offers
+  `edit` only ("Edit / Write"). opencode shares this code (`permission.disabled`), so the opencode
+  base's separate `write` switch is very likely a no-op too — not changed here, flagged.
+- **Two doors to the shell.** With `bash` denied, `background_process` (which takes a `command`) was
+  still offered, so the runner denies both when bash is switched off.
+- **A dead endpoint never fails.** Kilo's "offline guard" parks a turn whose connection drops, probes
+  connectivity, declares the network restored and retries — the retry budget resets on every retry.
+  Measured on the bare CLI: a refused connection ran ten minutes with a retry every five seconds and
+  no output; a server that accepts and drops the connection, 29 "session offline" cycles in 150 s.
+  Through the relay the same thing happened whenever the relay itself dropped the socket (it did not
+  catch `URLError`). The relay now answers an unreachable upstream with a 502 and the reason, which
+  every client reports: through a local runner the dead-URL turn failed in 76 s (the ai-sdk's retries
+  of a 5xx) with `upstream unreachable: [Errno 61] Connection refused`. A Messages-shape turn does not
+  ride the relay and is only bounded by the runner's turn ceiling.
+
+**Failure reporting (checklist #8), free probes:** a 401 is one structural `error` event (APIError,
+`data.message`, `statusCode`) and exit 1 in 4 s; a 503 is retried 6 times over 73 s and then the same
+event. Kilo never narrates a provider failure as assistant text, so no prefix is stripped, and an
+answer that starts "Error: …" stays an answer (both pinned in runner/tests/test_kilo_backend.py). An
+invalid Vercel key through the runner: `failed` in 6 s with Vercel's own sentence.
+
+**Resume.** SQLite `$HOME/.local/share/kilo/kilo.db`, table `session(id TEXT PRIMARY KEY, ...)`; an
+unknown `--session` exits 1 with nothing on stdout. The builder asks the table (read-only) before
+passing `--session`; a missing session starts fresh and the reply carries the resume_lost note
+(measured through the runner).
+
+**Local E2E through a runner, 2026-09-27 (Vercel, three paid turns, one session):**
+
+| turn | model | result | served_model (relay) | usage (in / out / cache read / cache write) |
+|---|---|---|---|---|
+| 1: remember a word, write hello.py, run it | gpt-5.4-mini | `PELICAN-42: 42`, tools glob, write, bash; hello.py produced | `openai/gpt-5.4-mini` | 11,311 / 636 / 32,256 / 0 |
+| 2: "what was the word?" (resumed) | gpt-5.4-mini | `PELICAN-42` | `openai/gpt-5.4-mini` | 2,265 / 40 / 8,704 / 0 |
+| 3: switch model, bash disabled, run echo | claude-haiku-4.5 | `NO-SHELL. Code word: PELICAN-42`; its bash call refused as "unavailable tool" | **none** | 118 / 81 / 13,154 / 13,406 |
+
+The real key was not in the kilo process's argv or environment on the relay turns (the relay's
+placeholder was), and not in any file under the workspace afterwards. Turn 3 was the gap that the
+next section closes: a claude id on an aggregator spoke Anthropic Messages, which opencode's rule
+keeps OFF the relay, so nothing reported a served model. The cost channel: a one-word follow-up is
+~11k input tokens (system prompt ~14.7k characters plus 22 tool schemas).
+
+### The claude rows had no served model, and the package choice was why (2026-09-28)
+
+Measured twice, in one session on integration:vercel, per turn: `gpt-5.4-mini` recorded
+`served_model='openai/gpt-5.4-mini'` and `claude-haiku-4.5` recorded `served_model=None`. So matrix
+rule 2 — served AS the model asked for — could not be evaluated for the claude row at all, and that
+row's five green scenarios said nothing about which model ran. **Usage was NOT lost**: the same
+session recorded 24,404 input / 13 output tokens (and an earlier one 14,124 / 640 / 48,672 cache
+read). That figure is the session aggregate over a gpt turn and a claude turn — the turns endpoint
+carries no per-turn usage — while `served_model` IS per turn, which is how the gap was isolated.
+
+The cause is one clause of the package choice `_opencode_npm`, inherited: a claude id on an
+aggregator connection (`tokenrouter`, which is how vercel, llmtr, tokenrouter and the hosted door
+are all wired) is served by `@ai-sdk/anthropic`, and an Anthropic-shape turn cannot ride the
+loopback relay because the relay finds a route by the placeholder BEARER it handed out while a
+Messages client sends `x-api-key`. No relay, no served model.
+
+It is not a protocol limit: an aggregator serves those ids over chat/completions perfectly well
+(cline and qwen reach every claude id that way, and the minimax backend measured
+`anthropic/claude-haiku-4.5` on this same provider and id through the relay on the same day). So
+kilo now makes its own choice (`_kilo_npm`): Messages only for a DIRECT Anthropic connection
+(provider `anthropic`, or a custom endpoint declared `anthropic`), chat/completions for the
+aggregators. Re-measured on the same rig, same session shape: `claude-haiku-4.5` records
+`served_model='anthropic/claude-haiku-4.5'`, which `_same_model` reads as the id asked for.
+
+**The broker question, answered.** Nobody had run an Anthropic-shape turn through the broker in
+self-hosted loopback mode. Run now, with the pre-fix code and `HR_SANDBOX_TRUST` off owner: the CLI
+posted `/v1/llm/v1/messages` (the ai-sdk appends its own `/v1/messages` to the broker base) and the
+broker answered 200 — `_broker_token` accepts `x-api-key`, so the turn completed with a brokered
+credential and the provider key never reached the sandbox. **But `served_model` was still null**,
+because nothing on the broker path stamps it: the gateway only ever takes a served model from the
+runner's result event, which is the CLI's own report or the relay's stamp. So the gap was the relay
+bypass and not a trust mode, and the fix repairs both modes — after it, the same claude turn in
+broker mode goes `/v1/llm/chat/completions` through the relay and records
+`anthropic/claude-haiku-4.5`.
+
+### The two rows the full column failed, chased on 2026-10-01/02
+
+The full column (55 pairs, 271/275 scenarios, served model on every row, zero substitutions) failed
+two rows and both reproduced on a retest. Neither is a defect in this backend, and neither is fixed
+here; what follows is what was measured.
+
+**`claude-opus-5`, ARTIFACT and RECYCLE.** `run ended without an assistant message; the model
+returned no output` — kilo's own words for a completion with no content — at 156/180 s and 147 s,
+twice, while first, follow-up and switch passed both times with `served_model=anthropic/claude-opus-5`.
+The two failing scenarios are the ones that run AFTER the switch, which is the shape the repo already
+records for this exact id: once a session holds a turn by another model, Anthropic answers further
+opus-5 requests with an empty stream and `finish_reason content_filter`, and the aggregators forward
+that answer unchanged (fdba6ed, measured 2026-09-12 against Anthropic directly; goose keeps the id
+off its list for it).
+
+Chased today at four levels, and NOT reproduced at any of them:
+- the CLI alone, real workspace and config, artifact prompt: tool call then `DONE`, exit 0, two
+  provider calls;
+- the wire, kilo's captured 14,689-character system prompt and all 22 tools: `finish_reason
+  tool_calls`, 21,392 input tokens;
+- the wire, a tool round trip with the assistant's reasoning signature carried back and stripped:
+  both arms answered;
+- the product, on the live instance, first → switch → artifact in the matrix's own order, with the
+  switch on `gpt-5.4-mini` and again on `gpt-6-astra` (what the column used): all three turns
+  completed both times, the artifact turn writing the file and replying `DONE`.
+
+So the provider was healthy for this shape on 2026-10-02 and the failure is not deterministic. What
+the column's two runs and the repo's September measurement share is the model and the post-switch
+position; what my reproduction could not match is the column's full four-turn history (first,
+follow-up, switch away, switch back) and its moment in time. Recorded as a provider-side limitation,
+with the id left in the catalog: removing it on evidence I could not reproduce would be a guess in
+the other direction. If a later column fails it again, goose's precedent (`_NOT_OFFERED`) is the
+remedy, and that is the maintainer's call rather than mine.
+
+**What IS fixed:** the relay now reads Vercel's hyphenated spelling of a refusal. `_FINISH_RE`
+admitted `[a-z_]` only, so `content-filter` never matched on that channel, `last_finish` stayed
+empty, and the check that turns a declined request into a stated reason never ran — the person got
+whatever the CLI made of an empty answer, which on kilo is the sentence above. Picked up from the
+agent-zero branch (07c650f), where the same empty-stream class was measured on
+`anthropic/claude-opus-5` and `anthropic/claude-fable-5.1`. If the column's failure is that refusal,
+the turn now says `the provider declined the request (finish_reason content_filter)` instead of
+kilo's private sentence.
+
+**`hunyuan-4-preview`.** ARTIFACT failed at 1073 s on the first run; on the retest the FIRST turn
+failed at 478 s with the tail stuck at `Working…` and no turn record at all. The provider is not the
+cause: `tencent/hy4-preview` (the id Vercel's own map serves for this canonical name) answered kilo's
+real request shape — the same 14,689-character system prompt and 22 tools — in 7.7 s for 14,436
+input tokens and $0.012, `finish_reason stop`, the exact text asked for.
+
+What was captured while the pair hung is a LIFECYCLE failure, and it is not this backend's: the
+session read `status=running` with `running_response_id: None`, no CLI process existed in the
+container at all, the relay's traceback was a `ConnectionResetError` writing a chunk back to a client
+that had gone, and it was still `running` at 993 s — past the runner's `MAX_TURN_SECONDS=900`. A
+cancel cleared it. Two mechanisms fit and neither was reproducible on demand: a descendant that
+escaped the process group still holding the CLI's stdout pipe, so the runner's reader loop never sees
+EOF and the record never leaves `running` (the trap `_kill_proc_tree` and `_sweep_turn_processes`
+were written for, and kilo's `background_process` is a tool that daemonises by design); or the
+gateway's owner task renewing the session heartbeat while polling a turn that can no longer finish,
+which keeps `_reconcile_session` from ever treating it as stale.
+
+One concrete misalignment, verified on the instance: the runner's ceiling is `MAX_TURN_SECONDS`
+(set to 900 there) while the gateway's backstop is `HARNESS_MAX_TURN_S`, which is unset and defaults
+to 21600. An operator who lowers the runner's cap still waits six hours for the gateway to settle a
+turn the runner has already given up on. Reported, not changed here: both are shared surfaces.
+
+### Tool enforcement, measured against `bash` (2026-09-28)
+
+`disabled_tool_unused` in the shared custom-harness dimension disables the fixed id `WebSearch`,
+which matches nothing on kilo (nor on qwen, gemini, cline, aider, kimi), so that claim passes
+VACUOUSLY here. Measured directly instead, on a live instance, gpt-5.4-mini on vercel, with an
+oracle no answer can fake: the file the command would write must contain a stamp that exists only
+in the turn's shell environment (a harness `env` variable, never in the prompt).
+
+| arm | bash | prompt | shell ran? | evidence |
+|---|---|---|---|---|
+| control | allowed | run the command | **yes** | `bash` called, proof.txt = the stamp |
+| control | allowed | use `background_process` | **yes** | `background_process` (monitor) called, proof.txt = the stamp |
+| deny | disabled | run the command | no | no tool calls, answer `NO-SHELL`, no file |
+| deny | disabled | use `background_process` | no | no tool calls, answer `NO-SHELL`, no file |
+| deny | disabled | use a subagent | no | no tool calls, answer `NO-SHELL`, no file |
+| deny | disabled | "you MUST call `task`" | no | `task` called, subagent answered `NO-SHELL`, no file |
+
+So the deny is inherited by a subagent (the permission map is kilo's own config, which the child
+session reads too), and `background_process` really is a second door to the same shell — it ran the
+command in the control arm — which is why the runner denies it together with `bash`. With both off
+the model is offered: agent_manager_models, apply_patch, board_post, board_read, glob, grep,
+kilo_local_recall, link_pr, read, skill, task, todowrite, webfetch, write.
+
+**Why the oracle is the stamp and not the file.** In one deny arm the model routed around the
+missing shell by having a subagent create `proof.txt` with `apply_patch` — the file existed and was
+EMPTY. A file-existence oracle would have recorded that as a shell escape and overturned the
+enforcement claim wrongly; the stamp says plainly that no shell ran. Disabling `bash` withholds
+execution, not file writing: `write` and `apply_patch` are separate switches, and a harness that
+wants neither must disable `edit` as well.
+
+## Four bases in one release: kilo, minimax, grok, agentzero (2026-10-03, 0.29.0)
+
+Kilo CLI 7.8.1, MiniMax Code 0.5.4, Grok Build 1.0.41 and Agent Zero v2.13 arrived as four pull requests
+with a fifth for the suite and the relay (#362 to #366). They were merged onto one branch, reviewed, and
+measured together on hr-test from release candidates (rc.2 to rc.5), every scenario driven through the
+console with Playwright. The sections above are the authors' own measurements on their instance; this
+one is the maintainer's, and it is what the columns in `docs/support-matrix.md` (`kilo-default`,
+`minimax-default`, `grok-default`, `agentzero-default`) were rendered from. "default" is the instance's
+own routing: each id ran on the connection the instance serves it with (TokenRouter for most, Vercel,
+OpenRouter, the direct Anthropic, OpenAI and Google connections and two custom endpoints for the rest),
+and each row names it. gpt-6.1-sol, the switch partner of most rows, was routed at OpenRouter as in its
+own column.
+
+**The columns** (full catalog, five scenarios per pair, failed pairs retested once on rc.4):
+
+| base | pairs | scenario runs, first pass | after the retest |
+|---|---:|---:|---:|
+| kilo | 59 | 287 of 295 | 291 of 295 |
+| minimax | 57 | 282 of 285 | 283 of 285 |
+| grok | 56 | 273 of 280 | 279 of 280 |
+| agentzero | 56 | 266 of 280 | 267 of 280 |
+
+**The other dimensions, all four bases:** family tour kilo 13 of 13, minimax 14 of 14, grok 14 of 14,
+agentzero 14 of 14 (one conversation each, rc.5; on rc.4 grok passed 7 of 14 and kilo 13 of 14, see
+below); plugin matrix skills, stdio, SSE and streamable HTTP 4 of 4 each; custom-harness 4 of 4 with
+MCP; browser column 4 of 4.
+
+**What the measurement found, and what was done about each.**
+
+- **A tool schema with a combinator at its root is refused by OpenAI as well as Anthropic.** grok's
+  `use_tool` on gpt-6.1-sol through TokenRouter: `Invalid schema for function 'use_tool': schema must
+  have type 'object' and not have 'oneOf'/'anyOf'/'allOf'/… at the top level`, on every turn. The repair
+  was gated on the claude family; it runs for every model now. It also dropped the root's own
+  `required` and every `allOf` branch's; `required` is the root's, plus every allOf branch's, plus what
+  all alternatives share.
+- **grok on kimi-k3 failed after the answer had arrived.** Moonshot through TokenRouter ends a stream
+  with `"prompt_tokens_details":{"audio_tokens":null,…}`; Grok Build parses token counts as u32
+  (`serialization error: invalid type: null, expected u32`). The relay writes a null count inside usage
+  as 0 on grok's route. Five of five on the retest.
+- **kilo's claude rows on a direct Anthropic connection carried no served model** (claude-sonnet-4.6,
+  claude-haiku-4.5, claude-sonnet-5.5-direct: 4 unlabelled turns each). A Messages-shape turn kept its
+  direct base, which also left the connection's real key in the CLI's environment. The relay has read
+  x-api-key since #352, so every keyed opencode and kilo turn rides it now; the three pairs are
+  labelled and five of five on the retest.
+- **What one model leaves in a conversation ended it for the next.** The tour on rc.4, grok 7 of 14:
+  the first turn's model screenshots the slide and reads the PNG, the client replays that tool result
+  to every later model, and an aggregator's Anthropic translation, Moonshot, and OpenRouter's llama,
+  hunyuan and nemotron endpoints each refused the request for the image in it; a tool call one family
+  streamed with an empty id was refused by Mistral and StepFun (`tool messages must include a non-empty
+  string tool_call_id`); and on kilo, two parallel calls with one id were refused by Mistral
+  (`Duplicate tool call id in assistant message`). The relay now names a refused image in words for
+  that model, fills an empty id, and renames a duplicate once a provider says so
+  (`runner/tests/test_relay_conversation_repairs.py`). grok 14 of 14 and kilo 13 of 13 on rc.5.
+- **Agent Zero had no browser because it never sent the plugs server its credential.** Its MCP writer
+  copied a server's `headers` and dropped `auth`; it takes them from `_mcp_headers` like every other
+  writer. Browser column pass on rc.4. The job no longer rides argv (readable by every session uid in
+  the container; it named the relay route's token and each MCP server's credentials).
+- **Review findings fixed before the columns ran:** a stream that stalled mid-answer was ended as a
+  complete, empty answer; a non-streaming body that stopped arriving became 200 with no content; a
+  dropped connection was resent twice; kilo.json (and opencode.json, Claude Code's mcp.json and the
+  bridge launchers, which had the same hole) carried MCP credentials into checkpoints; a character
+  outside the BMP made grok's config.toml invalid; Agent Zero's dependencies resolved freely on every
+  fresh volume (they install under `runner/agentzero-constraints.txt`, frozen from the measured venv).
+  The relay's upstream wait keeps its 600 s default; hr-test, whose suite caps a turn at 600 s, ran
+  with `HR_RELAY_UPSTREAM_TIMEOUT_S=180`.
+
+**Not offered after two failures of the same kind** (`_NOT_OFFERED`, the reason beside each):
+
+- kilo x llama-3.3-70b (OpenRouter): a runaway of Webfetch calls on the first turn, then the write call
+  printed as text instead of made.
+- minimax x gpt-5.6-terra: answers DONE without writing the file. minimax x gemini-3.5-flash-lite: the
+  artifact turn ends `Conversation history could not be safely updated. Please retry.`
+- grok x deepseek-v4-pro: the artifact turn ends `empty response from model (reasoning_only)`.
+- agentzero x claude-fable-5 and claude-fable-5-1: the provider declines the first turn
+  (`finish_reason content_filter`) with Agent Zero's system prompt; kilo, minimax and grok run both ids.
+
+**Left listed, with the row saying FAIL:** claude-opus-5's artifact and recycle turns on kilo and
+agentzero are declined by the provider's safety policy at the scenario's own words, the same two
+misses kimi's column recorded, and both pass on minimax and grok; agentzero x gemini-3-flash-preview
+answers the recall after a recycle with the previous turn's word twice, the recall trait recorded for
+gpt-6-luna on codex. kilo x gpt-5.3-codex has no switch partner on its connection.
+
+**Open, not this release's:** the console showed three file cards against one in the record on
+minimax x llama-3.3-70b's first artifact turn (it passed on the retest); a display mismatch to chase
+with a kept session. The withheld-tool claim of custom-harness is still judged on a tool the fixture
+never asks for (review of #362), so it cannot fail; the env-stamp oracle described under the minimax
+and kilo sections is the judge to move it to.
+
+## A list of free-form objects reached the tool empty (2026-10-05, 0.29.3 and 0.29.4)
+
+Reported from the hosted service: an agent asked a tool to insert rows and the tool received
+`[{}, {}]` or `[]`. The rows were in the model's plan and gone from its tool call.
+
+**The mechanism.** One tool whose argument is a list of objects, the model asked to pass two
+specific rows, one call per cell, the item's schema written four ways:
+
+| `items` | what the tool received |
+|---|---|
+| `{"type":"object"}` | the rows, in every cell |
+| `{"type":"object","properties":{}}` | `[{}, {}]` from OpenAI models through Vercel and through OpenRouter; `[]` from kimi-k3 through Vercel and through TokenRouter |
+| `{"type":"object","properties":{},"additionalProperties":true}` | `[{}, {}]` from OpenAI models through OpenRouter; the rows elsewhere |
+| `{"type":"object","additionalProperties":true}` | the rows, in every cell |
+
+The cells were eleven model families on Vercel and on TokenRouter, OpenAI models on OpenRouter, and
+OpenAI, Azure and Google AI Studio directly. A tool's author writes the first row. hermes, opencode,
+kilo and goose add the empty `properties` to every object node themselves, and Codex does for an MCP
+tool. With the key present a route may hand the model an object it can put nothing in; without it
+none did.
+
+**The repair (0.29.3, #394).** The relay drops an empty `properties` from every nested object node of
+a function tool's schema, for every model, and leaves the root `parameters` node as it is. A function
+tool sits in four places, and the repair walks all of them: `tools[].function.parameters` (Chat
+Completions), `tools[].parameters` (the Responses API), the `tools` of a `{"type":"namespace"}` entry
+(Codex groups a server's MCP tools that way), and the `tools` of an item in `input` (a tool search's
+answer). The first candidate covered the first place alone and left gpt-5.4 on Vercel at 14 of 17:
+with an OpenAI model on an aggregator, hermes (`codex_responses`), opencode and kilo
+(`@ai-sdk/openai`) speak the Responses API. hermes on an OpenRouter connection also called
+OpenRouter directly, with the connection's key in its environment; it takes a relay route now, like
+hermes's other connections.
+
+**The judge.** The plugin matrix has a `rows` column (`plugins/run-matrix.py --mode rows`): the
+fixture's second tool answers `PLUGIN_ROWS_OK` only when both rows arrive with their fields and says
+what it received otherwise. The tool is the judge; an agent's own record of its call is not (one base
+writes arguments through a file, and an answer can be cut short).
+
+**Measured**, every base that lists the model, through hr-test's side container:
+
+| model, connection | 0.29.2 | candidates of 0.29.3 |
+|---|---|---|
+| gpt-5.4, Vercel | 14 of 17: hermes, opencode, kilo | 17 of 17 |
+| gpt-5.4, OpenRouter | 16 of 17: hermes | 17 of 17 |
+| kimi-k3, TokenRouter | 14 of 16: hermes, goose | 15 of 16 |
+
+The remaining miss is aider with kimi-k3 answering with the model's reasoning and calling nothing,
+about one turn in three, before and after (#395). On the last candidate: the plugin matrix's five
+columns on six bases at their default models, 30 of 30, and hermes on OpenRouter through the console,
+four models by five scenarios, 20 of 20.
+
+**Codex (0.29.4).** 0.29.3 did not reach Codex: it was handed the connection's base and key and never
+passed through the relay. Codex 0.154.0 with gpt-6-luna, two runs per connection: the rows on
+TokenRouter, OpenRouter, OpenAI and Azure; `[{}]` and `[{}, {}]` on Vercel, and the same there with
+gpt-6.1-sol. gpt-5.4, gpt-5.4-mini, gpt-5.5, gpt-5.6-sol and gpt-6-astra passed on Vercel. For
+gpt-5.4 the hosted service captured why: Codex sends `{"type":"tool_search"}` and no MCP schema in
+the first request, so there is no empty `properties` to act on. That the other four pass for the
+same reason is inferred, not captured. Now every Codex
+connection that is not OpenAI's own or Azure's takes a relay route. The route keeps the connection's
+base exactly as stored, since Codex called `<base>/responses` whatever the base looked like; the CLI
+gets a loopback URL and a placeholder, so the connection's key is out of its environment; and the
+account fingerprint that decides whether a resumed history is replayed as content is still taken from
+the connection, because a route is new on every turn.
+
+With the route, Codex on Vercel: gpt-6-luna three of three, gpt-6.1-sol two of two, gpt-6-sol one of
+one, and on the built candidate gpt-6-luna twice and gpt-6.1-sol once.
+
+**Codex's columns with the route** (the branch's runner in a side container, through the console, one
+worker):
+
+| connection | models | scenarios passed | what did not |
+|---|---|---|---|
+| Vercel | 12 | 58 of 59 | gpt-5.6-luna's recall after a recycle |
+| TokenRouter | 12 | 57 of 59 | gpt-5.4's switch into gpt-6.1-sol; one artifact turn on gpt-5.4 |
+| OpenRouter | 3 | 15 of 15 | |
+| a custom Responses endpoint | 2 | 8 of 8 | |
+| OpenAI direct (route unchanged) | 2 | 10 of 10 | |
+| Azure (route unchanged) | 2 | 10 of 10 | |
+
+gpt-5.3-codex has no switch partner on Vercel or TokenRouter, nor has either model on the custom
+endpoint, so those rows count four scenarios. Each miss was run again with and without the route:
+
+- gpt-5.4's switch into gpt-6.1-sol on TokenRouter is refused with "cannot continue this task's
+  earlier reasoning through this provider" three of three with the route and two of two without it,
+  in the same time (132 to 173 s against 135 and 151 s). It is the condition recorded on 2026-09-10
+  for that route: its upstream accounts cannot open each other's encrypted reasoning. The relay
+  logged the provider's 400 once per turn.
+- The artifact turn on gpt-5.4 that produced no file passed two of two on the retest with the route,
+  and two of two without it.
+- gpt-5.6-luna's recall after a recycle answered the completion phrase three of three with the route
+  and two of three without it: the luna tier's recall recorded under the gpt-6 line.
+
+Also with the route: the family tour (one conversation, 1 of 1), the plugin matrix's five columns,
+the custom harness and the browser column, all on codex. On the built candidate (0.29.4-rc.1): three
+models on Vercel 15 of 15, two on TokenRouter 10 of 10, two on the custom endpoint 8 of 8, the plugin
+columns 5 of 5.
+
+**Not measured.** A Codex turn whose provider stays silent past the relay's wait: the relay ends such a
+call with its reason, as for every other base, and Codex was not driven into that case here.
+
+## How much a model thinks (2026-10-05)
+
+A turn can ask for a thinking level: `reasoning: {"effort": ...}` on a task, `reasoning_effort` on a
+harness, one of none, minimal, low, medium, high, xhigh. This section is what was measured to make
+that true, and it is the source of the table in `runner/reasoning.py`.
+
+**Method.** One question with a short answer, sent with no setting and then once per setting, straight
+at each provider through a connection of hr-test (`scripts/support-matrix/thinking/probe.py`, run as a
+shell command of a turn so no key leaves the instance). Judged by the provider's own usage:
+`reasoning_tokens`, with output tokens and elapsed time where a provider gives no such count. Seven
+routes (Vercel, TokenRouter, OpenRouter, OpenAI, Azure, Google AI Studio, and Anthropic's Messages API
+as TokenRouter passes it through), 66 model ids, three API shapes, about 900 calls. One sample per
+cell: the direction is the finding, not the number.
+
+**What it showed.** No field means the same thing everywhere, and a level a model lacks is refused
+with a 400, not ignored.
+
+`reasoning_effort` on Chat Completions:
+
+| models | Vercel | TokenRouter | OpenRouter | the vendor directly |
+|---|---|---|---|---|
+| gpt-5.2, 5.3-codex, 5.4, 5.4-mini | none, low to xhigh; `minimal` 400 | the same | all six | OpenAI and Azure: none, low to xhigh |
+| gpt-5.5, 5.6 line, 6-luna, 6-sol | all six | all six | all six | none, low to xhigh |
+| gpt-6.1-sol, gpt-6-astra | `none` accepted, not honoured | `none` 400 | `none` 400 | `none` 400 |
+| Claude, 4.5 to 5.5 | all six move it; opus-5.5 ignores `none` | accepted; the usage carries no count | the 5.5 line: `none` 400 | (Messages, below) |
+| Gemini 3 line | only `low` differs; `none` and `minimal` read as MORE | ignored | minimal, low, medium, high; `none` 400 | Google: none to high; `xhigh` 400 |
+| Grok 4.3, 4.5, 4.6 | two tiers; `none` reads as low | minimal to xhigh, in order; `none` 400 | the same; `none` 400 | |
+| DeepSeek v4 flash, v4.1 flash, v4 pro | `none` is off, the rest is on | the same; v4-pro `none` 400 | the same | |
+| Kimi k3 | `none` off; levels | `none` off | `none` off | |
+| Qwen 3.7-max, 3.8-flash | `none` off, the rest on | the same; low and medium 400 against the token cap | the same | |
+| Mistral medium 3.5 | none and high; minimal, low, medium 400 | none and every level | the same | |
+| Step 3.7 flash | minimal to xhigh, in order; `none` reads as more | the same | `none` 400 | |
+| MiniMax m3, Ling 3.0 flash, Nemotron 3.5 lightning, Hunyuan 3 | `none` off, the rest on | | the same | |
+| GLM 5.3, Kimi k2.7-code, Llama, Nemotron 3 super | nothing moved it, or it does not think | | | |
+
+The Responses API (`reasoning.effort`, OpenAI models only): as the first three rows, and `minimal` is
+a 400 on every route for every model tried, so `minimal` is never sent to an OpenAI model.
+
+Gemini needs Google's own setting where the field fails, and each aggregator keeps it under its own
+key. Through Vercel, `providerOptions.google.thinkingConfig` with `thinkingBudget: 0` for off and
+`thinkingLevel` for minimal, low, medium and high: gemini-3.5-flash 1,302 thinking tokens with no
+setting, 0 at a zero budget, about 600 at low, about 1,900 at high. Through TokenRouter the same
+setting under `extra_body.google.thinking_config` moves gemini-3.5-flash (0, 605, 1,636, 2,001) and
+nothing else: 3.6, 3.7, 3.8 flash and the lite models answered to no setting there. Per model: the
+pro model and the 3.7 and 3.8 flash models refuse a zero budget and `minimal` ("only works in
+thinking mode", "Thinking level MINIMAL is not supported"); the lite models do not think unless
+asked, and Google refuses `none` for them, so `none` there sends nothing.
+
+Anthropic's Messages API, read through TokenRouter's pass-through (the API's own refusals came back
+with their request ids):
+
+| model | off | a level |
+|---|---|---|
+| claude-haiku-4.5 | `thinking: disabled` | a budget (`enabled`, `budget_tokens`); adaptive and effort are 400 |
+| claude-sonnet-4.6 | `disabled` | adaptive with `output_config.effort` low, medium, high, max; `xhigh` 400 |
+| claude-opus-4.8 | `disabled` | adaptive with an effort; `enabled` 400 |
+| claude-sonnet-5, claude-opus-5 | `disabled` | adaptive with an effort |
+| claude-sonnet-5.5 | `between_tools`, the API's own word; `disabled` 400 | adaptive with an effort, xhigh and max included |
+| claude-fable-5.1 | cannot be turned off (both spellings 400) | adaptive with an effort |
+
+**The rules that follow from it** (`runner/reasoning.py`):
+
+- A level is sent only where a row above showed it accepted. A model that lacks the level asked for
+  gets the nearest one it has; `none` is given only to a turn that asked for it, and a model that
+  cannot be turned off gets its lowest level instead.
+- A model or a route that was not measured gets nothing sent and the turn's record says
+  `"applied": "default"`. A route is known by its host; a custom endpoint is not measured.
+- A level must never be what fails a call. If the provider answers 400 or 422 to a body the relay
+  wrote a level into, the body goes again as the client wrote it; if that is answered, the level is
+  dropped for that model for the rest of the turn.
+- One place by wire shape: the relay writes the level into Chat Completions, Responses, Messages and
+  Google's own bodies, for every base whose calls pass it. Three bases set it their own way: Claude
+  Code (`CLAUDE_CODE_EFFORT_LEVEL`, and `MAX_THINKING_TOKENS` for off and for the model that takes a
+  budget), Codex (`model_reasoning_effort`, which also holds on OpenAI's own endpoint and Azure's),
+  and the DeepSeek Harness driver, whose own relay calls the same functions.
+- The record: `reasoning: {"effort": asked, "applied": level}` on the response, and the provider's
+  count under `usage.output_tokens_details.reasoning_tokens`. The count is read where the relay reads
+  usage and kept apart from the usage that prices a turn, which is unchanged.
+- A turn and a harness that set no level send what they sent before: no route flag, no field, and
+  the tests compare the bytes.
+
+**Not measured, and said so in the table by absence:** Anthropic's API directly (the instance's key
+was refused that day; its rows come from the pass-through and are taken to hold), Bedrock and Vertex,
+any custom endpoint, and these ids: grok-4.20, grok-build-0.1, the other Qwen and Muse models,
+hunyuan-4-preview, claude-fable-5 (taken to be as fable-5.1). The direct OpenAI and Azure Chat
+Completions cells gave erratic counts for some models at some levels (zero where the Responses API
+gave a normal figure for the same level); the levels are accepted there, and the bases that reach
+those endpoints with OpenAI models speak the Responses API.
+
+**The column, every base** (`scripts/support-matrix/thinking/run-column.py`): one harness per base, the
+same task with no level and at none, low and high, through hr-test's connections (TokenRouter for
+these models), judged from the turn's record and the provider's count of thinking tokens. gpt-5.4
+wherever the base lists it. Run in a side container on the branch's runner, five bases at a time.
+
+| base | model | no level | none | low | high |
+|---|---|---:|---:|---:|---:|
+| codex | gpt-5.4 | 270 | 0 | 248 | 516 |
+| hermes | gpt-5.4 | 63 | 0 | 40 | 516 |
+| opencode | gpt-5.4 | 393 | 0 | 313 | 921 |
+| kilo | gpt-5.4 | 478 | 0 | 215 | 513 |
+| openhands | gpt-5.4 | 677 | 0 | 287 | 650 |
+| pi | gpt-5.4 | 0 | 0 | 230 | 485 |
+| omp | gpt-5.4 | 0 | 0 | 262 | 640 |
+| qwen | gpt-5.4 | 0 | 0 | 276 | 1,019 |
+| cline | gpt-5.4 | 0 | 0 | 298 | 778 |
+| kimi | gpt-5.4 | 0 | 0 | 242 | 666 |
+| minimax | gpt-5.4 | 0 | 0 | 192 | 512 |
+| grok | gpt-5.4 | 0 | 0 | 44 | 100 |
+| aider | gpt-5.4 | 0 | 0 | 313 | 512 |
+| agentzero | gpt-5.4 | 0 | 0 | 314 | 638 |
+| cheetahclaws | gpt-5.4 | 0 | 0 | 402 | 797 |
+| gemini | gemini-3.5-flash | 3,158 | no count | 2,531 | 4,125 |
+| goose | gpt-5.4 | 12 out | 12 out | 302 out | 652 out |
+| dsh | gpt-5.4 | 12 out | 12 out | 321 out | 698 out |
+| claude-code | claude-haiku-4.5 | 7,678 out | 859 out | 2,145 out | 7,757 out |
+
+19 of 19 bases that have a model with levels pass: every level asked is recorded as applied, none
+spends no thinking tokens, low spends fewer than high, and a turn with no level carries no
+`reasoning` on its record. System One has no model with levels and offers none. "out" is output
+tokens, where the turn has no thinking count: goose's and the DeepSeek Harness driver's calls do not
+give the relay one, and Anthropic gives none. On Gemini the provider left the count out of the answer
+that spent none (605 output tokens against 13 at the other levels: the answer written out).
+
+Claude Code's row is the weakest judge in the table and is read that way. Anthropic gives no thinking
+count, the level reaches the model as a budget (a ceiling, not a target) and the answer is written
+out at length, so one sample per level can cross: on Anthropic's own endpoint, three samples per level
+gave 791, 810 and 622 output tokens at none, 2,402, 1,700 and 2,128 at low, and 5,195, 2,838 and
+1,863 at high. Off is unmistakable; low below high holds on the sums (6,230 against 9,896) and not on
+every pair. The row above is the first run, through TokenRouter.
+
+**The same build, checked through the console and the API** (the candidate's image with the branch's
+runner and gateway, the day's last code):
+
+- The Thinking control on a harness's settings page, at 1440, 1024, 768 and 390 wide: in view, no
+  sideways scroll. Its options are the model's own (gpt-5.4: Model default, Off, Low, Medium, High,
+  Extra high; gpt-6.1-sol: the same without Off). Saved, reopened, still High. A level kept from
+  another model stays selected and the form says its tasks get the nearest one.
+- A task on that harness with no level of its own: `{"effort": "high", "applied": "high"}`, 15
+  thinking tokens. The same task asking for `none` itself: applied none. A value that is not a level:
+  400 "reasoning.effort must be one of: none, minimal, low, medium, high, xhigh".
+- hermes with gpt-5.4, asked to write a 9,000 word file as its first action: completed after 619 s
+  with 13,340 output tokens, where 0.29.4 stopped it at 93 s.
+- CheetahClaws: 4 of 4 plain turns carry their usage.
+- A task sent with `backend: "claude-code"` completes, as with `backend: "claude"`.
+
+What "no level" means differs by base on the same model, which the column shows for the first time:
+gpt-5.4 does not think unless asked, and eleven bases leave it so; Codex asks for medium itself (its
+own config default), OpenHands asks for high for every model, and hermes, opencode and kilo ask for
+something of their own. A level set on the harness or the turn replaces all of these.
+
+**Three defects the column and the hosted service found, fixed with it:**
+
+- *A turn's record read "default" for a level that had been applied.* pi and omp keep their relay
+  placeholder in a file, not the environment, and the record was read through the environment: pi with
+  gpt-5.4 spent 12, 252 and 441 output tokens at none, low and high and recorded default three times.
+  A turn now keeps the routes it registered and reads its record off them.
+- *CheetahClaws turns had no usage at all.* The relay added a streamed call's usage to the route when
+  the stream ended, which is when the provider closes it, not when its last event passes; a client
+  that is done at `[DONE]` read the route before its own call was on it. On the published 0.29.4,
+  8 of 8 plain CheetahClaws turns came back with no usage; with each chunk's figures folded in before
+  the chunk is forwarded, 0 of 6. When this began was not measured (the relay has forwarded streams
+  as they arrive since 0.29.1, which is the likely start).
+- *hermes stopped a turn whose first answer was long.* hermes writes a message into its database only
+  when it is complete, so a first answer that streamed for more than 90 s looked like a hung call and
+  was stopped (found on the hosted service; on 0.29.4 here, hermes with gpt-5.4 asked to write a
+  9,000 word file as its first action ended `incomplete` after 93 s with nothing written). The guard
+  now also asks when a provider last sent an event on the turn's route; the CLI that hangs after its
+  provider answered is still caught.
+
+Also from the hosted service: `backend` on POST /v1/responses took a base's id ("claude-code") as the
+backend, matched no model, and refused every model as having no provider there. It names the base's
+backend now.
+
+## Where a turn's fixed seconds went (2026-10-05, 0.30.1)
+
+Two changes ported from the hosted service, where both were found and first measured, and measured
+again here through a streamed task (`stream: true`, timed at the client): when the first text
+arrives, in how many steps the answer grows (text arriving after a pause of 0.1 s or more), and how
+long after the last text the task says it is complete. Warm turns of one session, medians.
+
+**The gateway asked for a turn's events every 1.2 s.** So the first text waited up to that long, a
+streamed answer grew in jumps of that size, and the end was heard at the next ask. The runner now
+holds the request (`GET /turn/{id}?wait=`) until it has an event, the turn is done, or the wait has
+passed, and says `held`; the gateway asks again at once, writes the durable trace once per interval
+instead of once per answer, and paces itself the old way when an answer does not say held (an older
+runner) or a request failed. The duties that counted polls (the lease, the heartbeat, the durable
+cancel check) count the clock. `HARNESS_RESP_HOLD_S` sets the hold (3 s; 0 asks the old way). The
+hold waits on the runner's event loop, not on a worker thread: one runner serves every session of an
+instance, and 120 turns held at once answer together in the test.
+
+**A checkpoint carried what a CLI rebuilds for itself.** omp's two native binaries, Codex's plugin
+catalogue and the DeepSeek Harness's unpacked packages travelled in the workspace's archive after
+every turn. They are left out now (`_REBUILT_CACHES`). opencode's npm cache is deliberately not:
+rebuilding it cost a turn 20 s on the hosted service.
+
+| base, model | | 0.30.0 | with the hold | with the hold and the smaller checkpoint |
+|---|---|---:|---:|---:|
+| pi, deepseek-v4-flash | first text | 2.71 s | 2.68 s | 2.88 s |
+| | steps | 2 | 5.5 | 7.5 |
+| | last text to complete | 0.20 s | 0.18 s | 0.15 s |
+| codex, gpt-5.4 | first text | 4.13 s | 3.79 s | 3.98 s |
+| | steps | 3 | 7 | 8 |
+| | last text to complete | 3.72 s | 3.19 s | 0.22 s |
+| | whole turn | 10.4 s | 8.9 s | 6.0 s |
+| omp, gpt-5.4 | steps | | 7 to 9 | 10.5 |
+| | last text to complete | | 7.5 s | 0.37 s |
+| | whole turn | | 15.4 s | 9.6 s |
+| claude-code, claude-haiku-4.5 | first text | 3.99 s | 4.22 s | |
+| | steps | 1 | 1 | |
+| hermes, gpt-5.4 | first text | 28.7 s | 23.7 s | |
+| | steps | 1 | 1 | |
+
+Read with their sizes: four to eight turns per cell, and the model's own time is most of "first
+text". What moved beyond noise is the number of steps a streamed answer grows in (pi 2 to 7.5, Codex
+3 to 8) and the end of a turn on the two bases whose checkpoint shrank (Codex 3.7 s to 0.2 s, omp
+7.5 s to 0.4 s). Claude Code and hermes hand over whole messages, so their answers arrive in one step
+either way; hermes's first text is its whole answer and its difference here is the model's.
+
+Not ported, with the reason: the hosted change that lets a turn's record writes run beside the loop
+(each write costs about 0.4 s there; here the store is a local file), and the per-turn timing log
+line that found these.
+
+## The thinking level behind a broker (2026-10-06, 0.30.2)
+
+The hosted service took the thinking level from 0.30.0 and ran the same column against it, and its
+port found what the owner-trust measurement here could not: in broker trust the gateway's own broker
+sits between the agent and the provider, and it removes the thinking controls (`thinking`,
+`context_management`, `output_config.effort`) from every Anthropic-shape request. That rule exists
+for what Claude Code sends by itself, which some model versions refuse. A level the turn had asked
+for was removed with it: the turn ran at the model's default and its record said the level had been
+applied. This tree has the same broker and the same rule.
+
+Fixed the way the hosted service fixed it: the per-turn credential the agent is handed carries the
+level as a fourth field, only when the turn asked for one, and the broker keeps the thinking controls
+of a request that arrives under such a credential. A turn that asked for nothing carries the
+credential it always did and its requests lose the controls as before. On the OpenAI shapes the
+broker never removed anything of the thinking group (`reasoning_effort`, `providerOptions`,
+`extra_body` all pass), which the hosted service pinned in a test and showed live: a Gemini model at
+`none` spent 0 thinking tokens through its broker and TokenRouter.
+
+Measured here in broker trust (a side container with `HR_SANDBOX_TRUST=broker`; the image's
+default is owner trust, where the agent holds the key and no broker is in the way). Claude Code with
+claude-haiku-4.5 through the broker and TokenRouter, output tokens of three runs per level:
+
+| | none | low | high |
+|---|---|---|---|
+| 0.30.1 | 690, 726, 768 | 838, 782, 689 | 931, 774, 712 |
+| with the fix | 730, 538, 824 | 2,277, 2,256, 1,686 | 2,284, 2,754, 3,801 |
+
+On 0.30.1 every turn recorded its level as applied and all nine spent what a turn with no level
+spends. hermes, pi and Codex with gpt-5.4 passed the column in broker trust before and after (their
+level rides `reasoning_effort` through the relay and the broker, which the gateway makes possible by
+naming the route): the first end-to-end run of the level behind this tree's own broker.
+
+The column's judge passed the 0.30.1 row: on output tokens "low below high" held by noise (2,309
+against 2,417). It now also asks, where output tokens stand in for a missing count, that low spend
+at least half again what none does; the 0.30.1 row fails it and every earlier pass still passes.
+
+The hosted column, as that session reported it (`run-column.py` from 915c834, one run per level,
+gpt-5.4 unless said; thinking tokens at none, low, high):
+
+| base | none | low | high | |
+|---|---:|---:|---:|---|
+| hermes | 0 | 62 | 403 | |
+| goose | 0 | 278 | 831 | |
+| cheetahclaws | 0 | 302 | 471 | |
+| kimi | 0 | 224 | 516 | |
+| qwen | 0 | 434 | 779 | |
+| codex | 12 out | 271 out | 501 out | no count: its calls go to the broker without passing a relay there |
+| claude-code, claude-haiku-4.5 | 721 out | 1,964 out | 2,248 out | with the broker keeping the controls |
+| opencode | | | | recorded default at every level on the first image |
+
+7 of 8. opencode, pi and omp talk to the broker directly on the hosted service (they ride the relay
+here for every keyed turn), so the relay never saw their calls; there they now take the relay for a
+turn that asks for a level. That difference between the trees is the hosted one's and is recorded
+here because the column is shared.
+
+With that change the hosted session ran the column again and reported 11 of 11, these rows among
+them (thinking tokens at none, low, high):
+
+| base | none | low | high | |
+|---|---:|---:|---:|---|
+| pi | 0 | 243 | 516 | |
+| omp | 0 | 252 | 456 | |
+| opencode | 0 | 272 | 804 | |
+| codex | 12 out | 233 out | 530 out | output tokens, as above |
+
+Not run on the hosted service at the time of writing: the Gemini CLI base, and most bases at more
+than one model.
+
+## How long a thinking model says nothing, and the relay's wait (2026-10-06, 0.31.0 and 0.31.1)
+
+The relay ends a model call that sends no event for `HR_RELAY_UPSTREAM_TIMEOUT_S`. The default was
+600 s and is 180 s from 0.31.0, the value the hosted service runs. Before changing it the cost was
+measured, because the old default had been chosen for it: a model that thinks without sending
+anything looks, on the wire, like a provider that has stopped.
+
+One hard three-part counting problem, streamed, at each model's highest thinking level, straight at
+the provider through a connection of hr-test, with the relay's own wait raised to 1,200 s so it could
+not interfere. An event is a `data:` line; a keep-alive comment line is not one, here as in the relay.
+One sample per cell. The longest run with no event:
+
+| model, level | TokenRouter | Vercel |
+|---|---:|---:|
+| gpt-5.5, xhigh, Chat Completions | 201 s | 11 s |
+| gpt-5.5, xhigh, Responses | 30 s | 61 s |
+| gpt-6.1-sol, xhigh | 19 s (Responses) | 15 s (Chat Completions) |
+| gpt-6-sol, xhigh, Chat Completions | no answer in 1,200 s | |
+| gemini-3.1-pro-preview, high | 205 s | 4.5 s |
+| claude-opus-5, xhigh | 35 s | |
+| claude-opus-5.5, xhigh | | 211 s |
+| grok-4.6, xhigh | 13 s | 12 s |
+| deepseek-v4-pro, xhigh | 2 s | |
+| kimi-k3, high | | 0.7 s |
+| qwen3.7-max, high | | 2 s |
+
+Whether thinking shows on the wire is a property of the route and the request shape, not of the
+model. Where a route forwards reasoning as it happens the stream is never quiet for long, and that
+was 13 of the 16 cells. Three were silent for over 200 s and then answered: OpenAI's Chat Completions
+through TokenRouter sends nothing until the first token of the answer (the same model on the
+Responses API, or through Vercel, streams throughout), TokenRouter's Gemini channel likewise, and
+Claude Opus 5.5 through Vercel sent one event and then keep-alive lines for 211 s. One call never
+answered at all.
+
+So the two waits buy different things. At 600 s the three silent answers complete and the call that
+never answers holds its turn for ten minutes. At 180 s that call ends in three minutes and the three
+answers are cut off as "the provider did not answer". Richard chose 180 s for both the hosted service
+and this default with these numbers in front of him. An operator who runs such models at such levels
+on such routes raises the variable; the bases that speak the Responses API to OpenAI models (Codex,
+hermes, opencode, kilo) were not exposed in any cell.
+
+**The decision was reversed the same day (0.31.1): the default is 600 s again.** Asked to find a way
+to make the three silent cells speak, a second measurement found the silence was not three cells. The
+same problem and levels, each call watched for 430 s, now also straight at the vendors and through
+OpenRouter, and with every request field that might ask a route to show its thinking:
+
+| Chat Completions, longest run with no event | TokenRouter | Vercel | OpenRouter | the vendor itself |
+|---|---:|---:|---:|---:|
+| gpt-5.5, xhigh | over 430 s (3 of 3) | 11 s | 61 s | OpenAI over 430 s; Azure over 430 s |
+| gemini-3.1-pro-preview, high | 187 s, 234 s | 4.5 s | 4.8 s | Google 141 s |
+| claude-opus-5.5, xhigh | | 211 s | 10.6 s | not measured |
+
+- **OpenAI's Chat Completions API sends nothing while a reasoning model thinks**, and that is the
+  API, not a reseller: five calls of five passed 430 s without an event, direct, on Azure and through
+  TokenRouter (where even the status line waits for the first token: headers at 201 s in the first
+  measurement). `stream_options.include_usage` and `include_reasoning` change nothing; `reasoning` is
+  refused as an unknown parameter. On the Responses API the same model sent an event at least every
+  30 s on all three, and about every 13 s with `reasoning.summary: "auto"`.
+- **Gemini** on Google's own endpoint speaks when asked with
+  `extra_body.google.thinking_config.include_thoughts: true` (longest gap 4.6 s), but the thoughts
+  arrive inside `delta.content` as `<thought>...</thought>`, with the answer after the closing tag in
+  the same chunk, so a base would show them as its answer. Through TokenRouter the field does nothing.
+- **Claude Opus 5.5 through Vercel** speaks when asked with `providerOptions.anthropic.thinking:
+  {"type": "adaptive", "display": "summarized"}`: a 255 s think with a longest gap of 6.8 s, in
+  `delta.reasoning` and `reasoning_details`, not in the content. `reasoning: {"enabled": true}` and
+  `include_reasoning` do nothing (195 s and 209 s of keep-alive lines).
+- OpenRouter spoke on all three models, and Vercel on OpenAI's and Google's.
+
+So at 180 s every base that speaks Chat Completions to an OpenAI model was exposed at a high level on
+a hard problem, and that is most bases. On those routes a call that is thinking and a call that is
+stuck look the same on the wire. Richard was offered the two request-field fixes and a longer wait
+for OpenAI's chat calls alone, and chose the old wait for everything. Neither fix was built; the
+fields above are recorded for whoever wants a shorter wait later. One sample per cell unless said,
+and how long a model thinks on one problem varies widely (the same Claude call took 29 s and 211 s).
+
+The same problem as a real task on the 0.31.1 candidate (pi, gemini-3.1-pro-preview through
+TokenRouter, thinking level high). With the wait set to 180 s, as 0.31.0 shipped it: the relay cut the
+model call four times, 183 s apart, pi retried each time, and the task failed after 737 s with "the
+provider did not answer". At the default, five runs: all five completed, after 28, 125, 179, 212 and
+494 s, with no cut; gpt-5.5 at xhigh straight at OpenAI completed after 128 s. So the shorter wait did
+not end a slow task sooner: it turned a task that finishes into one that fails four waits later.
+
+## An Azure connection that signs in with Microsoft Entra (2026-10-06, 0.31.0)
+
+For an organization that issues no API keys for its Azure resources: the connection is an application
+in the organization's own Entra directory (tenant ID, client ID, client secret), and the gateway's
+broker asks Entra for a token by the client-credentials grant and presents it as the bearer where a
+key connection sends `api-key`. Built on the hosted service and taken from there with its tests.
+
+What this tree adds is one rule. In owner trust, the image's default, a connection's key is handed
+to the agent. This connection has no key to hand, only a secret that buys a token good for about an
+hour, and a turn may run for six. So a connection of this kind goes through the gateway's broker in
+every trust mode, and the broker asks again as the token ages.
+
+Measured on the release's candidates in side containers on the test VM, in owner trust, with a test
+application in our own directory holding the "Cognitive Services OpenAI User" role on one Azure
+OpenAI resource and one Foundry resource:
+
+- **Four bases completed on the Entra connection**: pi and goose and hermes with gpt-5.4-mini, Codex
+  with gpt-5.4, each served by that connection. The gateway signed in once for all four
+  (`[entra] signed in as application ••••1234; asking again in 3299 s`, one line per sign-in).
+- **The agent holds neither the secret nor a token.** Checked while a pi turn was running a shell
+  command: none of the container's processes (the agent's and its shell's among them, read with the
+  rights to read every process's environment and command line) and none of 5,995 workspace files
+  held the client secret or an access token for Azure. The secret itself is not readable as text
+  anywhere on the data volume.
+- **The sign-in is renewed inside a running turn.** A token is good for 3,599 s and the gateway asks
+  again 300 s before that. One pi turn with gpt-5.4 was started 119 s before a sign-in was due for
+  renewal and ran six 85 s shell commands, one model call after each: 04:40:39 to 04:49:17 UTC. The
+  sign-in it began on was made at 03:47:37 (due again at 04:42:36, dead at 04:47:36). Its first two
+  model calls went out on that token; the third, at 04:43:32, made the gateway sign in again (the
+  log's line is at 04:43:32.7); the last two came after the first token's own expiry. The turn
+  completed with six tool calls and the six times. Before that, with the instance idle for an hour
+  and forty minutes past a token's expiry, the next turn signed in again by itself and completed.
+- **No role on the resource**: the same application pointed at a resource it has no role on. Azure's
+  own 401 reaches the turn: `Your azure connection was refused: ... {"code":"PermissionDenied",
+  "message":"The principal ... lacks the required data action
+  Microsoft.CognitiveServices/accounts/OpenAI/responses/write ..."}`.
+- **A directory Entra does not know**: the turn fails in 2 s on pi with `Your azure connection was
+  refused: ... Microsoft Entra refused this connection's sign-in: AADSTS90002: Tenant '...' not
+  found. ...`. Nothing is remembered of a refusal: the next call asks again.
+- **A key connection is untouched**: pi and Codex on the same Azure resource by API key completed,
+  handed the key as before.
+- **The form** on the Integrations page at 1440, 1024, 768 and 390 wide: "Sign in with" offers API
+  key and Microsoft Entra, the fields change to the directory ID, the application ID and the client
+  secret, a directory written as a name is refused with the field's own label, a saved connection
+  comes back with the secret masked and no key.
+
+Two defects came out of the measuring and are fixed in the release, here and on the hosted service:
+
+1. A sign-in Entra refuses came back from the broker as a 502. Codex reconnected five times before
+   giving up (28 s), and a 502 is not a refusal to the gateway, so the turn was free to try its next
+   connection, which is what the refused-key rule exists to prevent. A sign-in Entra answers with
+   400, 401 or 403 is now a 401 from the broker, as a refused API key is. Codex still makes its
+   reconnect attempts on a 401, as it does on a refused key, and now fails in 8 s. Entra throttling
+   or failing stays a 502.
+2. The turn said "Your azure key was refused" on a connection that has no key. It says "connection".
+
+Not measured here:
+
+- **A completed turn on a Foundry resource.** This tree's catalog has no model that the one Foundry
+  resource we could use has deployed, and only a custom connection may name a model outside the
+  catalog. What was observed is the next thing down: a catalog model asked of that resource came back
+  `404 DeploymentNotFound`, not a refusal, so the resource accepted the application's token. The
+  hosted service completed a pi turn on that resource through the same code.
+- A sovereign cloud (`HR_ENTRA_AUTHORITY`), and a client secret that expires or is rotated while a
+  turn runs.
+
+## A build said ready before its version was active (2026-10-06, 0.31.0)
+
+Issue #401: `test_the_turn_gets_the_path_the_variables_and_the_instructions` failed once in CI with
+"409: the environment has no built version" and passed on the rerun. It was not a flake. A build
+wrote its record as `ready` and made the version active in the next statement, and the record is what
+every reader waits on: the test, the console's build view, a script polling the API. A turn started
+in between was refused. On a normal disk the window is too short to meet; a slow CI disk met it.
+
+The version is now made active, and its mount made, before the record is written, and if any of the
+three steps fails the active version goes back to what it was (a failed build never becomes active,
+as before). A test asks the question at the instant the ready record is written and fails on the old
+order. On the candidate: an environment with a pip, an npm and an apt package built in 9 s, a turn
+started in the same instant its record read ready completed using the environment's package, and the
+environments column passed on pi, Codex and Claude Code, 9 of 9 tasks.
+
+## Who may run a harness (2026-10-06, 0.31.2)
+
+Until this release the harness id alone was what ran a harness: a comment in the code called it
+"the run capability", written for a marketplace in which callers run a harness and its owner pays.
+Anyone who knew an id (console links carry it) could start a task on the harness, with the owner's
+connected plugs and database, on the owner's connections. Richard's rule, made on the hosted service
+first and the same here: "a harness can run by id and workspace's API key".
+
+The caller's organization must be the harness's; a caller narrowed to a workspace runs that
+workspace's harnesses, a harness from before workspaces counting as the Default Workspace's; a key
+for the whole organization runs any of its harnesses; a built-in base has no owner. The refusal is
+`404 harness_not_found`, what every other route answers for a harness that is not the caller's. It
+is the same test the harness list already applied, so what a key lists, it runs, and a harness made
+with a key is stamped with that key's workspace, so what a key makes, it runs.
+
+Candidate `0.31.2-rc.1` in a side container on the test VM, on a copy of an instance with 77 harnesses (36 stamped with the Default Workspace, 41 from before workspaces). Keys were minted for two workspaces and for the whole organization, and a harness was made with workspace one's key:
+
+| Caller | Result |
+|---|---|
+| Workspace one's key, its own harness | completed |
+| Workspace two's key, that harness | `404 harness_not_found`, and the harness is not in its list |
+| A key for the whole organization | completed |
+| Workspace two's key, a built-in base | completed |
+| Another organization (the gateway's internal door, another organization named) | `404 harness_not_found`, also when it names the right workspace |
+| The console in workspace one | completed |
+| The console in workspace two, and in the Default Workspace | `404 harness_not_found` |
+| The Default Workspace's key, a harness made before workspaces | completed |
+
+Through the console itself (Playwright): a harness created and run on pi, with its skill, script and tool policy. Claude Code tasks complete, and all plugin checks pass on Claude Code, Codex and pi, each of which makes its own harness and runs it.
+
+## The built-in image skill in front of the media tools (2026-10-06, 0.31.3)
+
+The built-in `imagegen` skill works only through a turn's image credential. With none its script
+refuses: "image generation is not configured for this Harness. An operator needs to add an integration
+that serves an image model". On the hosted service a pi agent whose harness also carried the media
+tools read the skill first, took the sentence as final and told the person images were unavailable,
+two runs of three, with `media_generate_image` one call away. This tree has the same skill, mounted by
+default, and the same two ways to make an image, resolved from different tables: the skill's credential
+from the image model map, the media tools' providers from the integrations by kind. So a turn can have
+the second without the first: image models switched off, or broker trust without `HR_BROKER_IMAGES`.
+
+On such a turn the built-in is now dropped and suppressed. Where the turn has no other way to make an
+image the skill stays, which is where this tree differs from the hosted one: here the person asking is
+the operator, and the refusal is what says what to add.
+
+Candidate `0.31.3-rc.1` in a side container on the test VM, on a copy of an instance whose Videos kit harness carries the media tools. One request each ("make one image, then say MADE or CANNOT"):
+
+| The turn | The image skill in the session | What the agent did |
+|---|---|---|
+| Media tools, an image credential (Claude Code) | present | made the image with the media tool |
+| Media tools, no image credential (Claude Code) | absent | made the image with the media tool |
+| No media tools, no image credential (pi) | present | ran the skill and answered "CANNOT image generation not configured" |
+
+The image credential was removed by switching the instance's image models off on the Integrations document. Not reproduced here: the agent giving up in front of a working media tool. That was seen on the hosted service with a pi agent; Claude Code on this harness chose the media tool either way. What is shown here is that the skill is no longer offered in that state. Claude Code tasks complete, and all plugin checks pass on Claude Code, Codex and pi (the skill checks among them).
+
+
+## Hermes: a refusal from a tool is not its server failing (2026-10-06, 0.31.4)
+
+`hermes-agent` 0.19.0 keeps a circuit breaker per MCP server and bumps it on every error answer,
+including one a live server gave on purpose: a tool result marked `isError`, "no such document".
+Three in a row open the breaker, and for 60 s every tool of that server is refused with "MCP server
+... is unreachable after 3 consecutive failures". On the hosted service an agent that had read three
+wrong ids could then not use any tool of that server and told its person the service was down.
+
+The patch (`runner/patches/hermes_mcp_breaker.py`, the hosted one) marks the error answers that came
+from the server's own tool result and resets the breaker for those. Hermes is installed on an
+instance's first start, not in the image, so the entrypoint applies it to the installed copy on every
+start, which also repairs a volume installed before it existed.
+
+A small tool server was run inside the side container, with one tool that refuses on purpose (`get_document` of an id that does not exist is an error answer) and one that always answers (`list_documents`). One Hermes task with gpt-5.4: four refused `get_document` calls, then `list_documents`.
+
+| The instance | What `list_documents` returned |
+|---|---|
+| Published 0.31.3 | "MCP server 'company' is unreachable after 3 consecutive failures. Auto-retry available in ~50s." The server was up and answering. |
+| Candidate `0.31.4-rc.1`, started on the volume 0.31.3 had installed Hermes into | `["doc-1"]` |
+| Candidate, on a fresh volume (Hermes installed on that first start) | `["doc-1"]` |
+
+On both candidate starts the log has one line, "Hermes: a tool's own error answer no longer counts against its MCP server", and Hermes's module holds the two marks. A restart applied nothing again and logged nothing. A plain Hermes task completes. An instance started without Hermes starts, logs nothing about it, and passes the usual checks (pi and Claude Code tasks, all plugin checks on Claude Code, Codex and pi).
+
+The patch was run against the real `hermes-agent` 0.19.0 file: it changes two places and the result compiles (the test for this needs the file at hand and is skipped in CI, since Hermes is not in the image).
+
+Not shown live: a server that cannot be reached still opening the breaker. When the tool server was stopped mid-task Hermes dropped its tools ("Unknown tool") before the breaker came into it. That half is covered by the test of the patched check, where an error that did not come from a tool's own answer still counts.
+
+## The qoder backend: Qoder Cloud Agent, the first remote runtime (2026-10-09) — behaviour measured at a stub, NO column yet
+
+Qoder Cloud Agent runs the agent loop in Qoder's cloud and is reached over its Managed API
+(REST + SSE, `/api/v1/cloud`). The runner's turn process, `runner/qoder_driver.py`, is an HTTP
+client to it: it creates one Environment, one Agent and one Session per HarnessRouter session,
+posts the message, follows the event stream and lands delivered artifacts in the workspace root.
+The registry marks the backend `remote`, and `docs/harness-verification.md` ("Remote runtimes")
+lists what that changes. Issue #236 holds the design discussion.
+
+### Behaviour measured before any column
+
+Measured against a stub of the Managed API built from the public reference
+(`runner/tests/test_qoder_backend.py`, the driver run as the subprocess it is), not against
+api.qoder.com; the live column is the next step and needs a tenant's PAT.
+
+- A turn with a tool call and a delivered artifact: the delta text then only the remainder of the
+  buffered message; the tool call and result under Qoder's event ids; the artifact in the
+  workspace ROOT with its declared bytes, nothing under `.harness/`; the result with no usage, no
+  model, and `charge: {amount, unit: "qoder_credits", basis: "snapshot"}` from the session's usage
+  snapshot, less what the session had used before the turn (the snapshot is the session's running
+  total: 0.35 after the recorded session's first turn, 0.61 after its second, so the second is
+  charged 0.26). The Agent's toolset carries the disabled tool out of the whitelist, in
+  `disallowed_tools` and `enabled: false`; every enabled one `always_allow`.
+- A declared artifact that does not land, a name with a path, `..`, a dot directory or a control
+  character: the turn is `incomplete` naming the file, nothing is written for it, and nothing is
+  even fetched for a refused name. An existing file is never overwritten (`name (2).ext`) and a
+  symlink is never followed.
+- A tool disabled between two turns of one session: the Agent gets a new version AND the session's
+  own tools are replaced (`POST /sessions/{id}`, `agent.tools`) before the message goes.
+- A session archived at Qoder, or an id the state never knew: `resume_lost`, then a new session; a
+  session still running an earlier turn: a conflict, failed, and the message is not sent.
+- A pending confirmation (`stop_reason: requires_action`): answered — `allow`, or `deny` with a
+  message for a tool the harness disabled — and the turn goes on to its real stop.
+- Every `stop_reason` other than `end_turn` is `incomplete` with the raw reason; a `session.error`
+  with `retry_status: retrying` is waited on, one with `exhausted`/`terminal` fails the turn with
+  Qoder's sentence; `session.status_terminated` fails it.
+- Input files: uploaded once by content hash, mounted at `/mnt/session/uploads/<name>` and named
+  in the system prompt; a binary file fails the turn before anything is created, naming it.
+- Skills: published as custom Skill resources from the staged bundle (bare file tree under the
+  frontmatter name), a new version only when the bytes changed, bound on the Agent; a bundle
+  whose `name` is not a Qoder skill name is reported, not published. A URL MCP server's bearer
+  becomes a Vault credential and the session names the vault; a stdio server is reported
+  `mcp_unavailable`.
+- SIGTERM mid-turn: `POST /sessions/{id}/cancel` reaches the stub, the record carries "cancel
+  accepted by Qoder for session <id>", exit 0; through the runner, `cancel_turn` on a `remote`
+  backend sends SIGTERM first and the driver's last lines reach the turn record before the kill,
+  while a local backend's stop is the SIGKILL it always was.
+- The relay route: a session object naming the configured model passes through and the turn's
+  served model stays empty; DELETE goes up; a 404 comes down as the API wrote it; a stalled stream
+  is closed without an error event. The stub sees the real credential and never the placeholder;
+  the driver sees the placeholder and never the credential.
+- The purge: cancel then delete the session, delete artifact and input files, archive the Agent,
+  delete the Vault, the Skills and the Environment (archived when still referenced); an object
+  already gone is not a failure; a delete the API refuses is reported with its id and the exit says
+  so. `DELETE /workspace` with the connection in its body runs it through the relay; without a
+  credential the folder still goes and the answer says what was left at Qoder.
+
+### Live, against api.qoder.com (2026-10-09, Global region, model `efficient`)
+
+The driver run directly against the Managed API with a tenant PAT, no gateway in the path; the
+recorded history is `runner/tests/fixtures/qoder/live-session-events.json` and a test reads the
+driver's mapping off it.
+
+- **First turn** (12.7 s): Environment, Agent (v1) and Session created; `Write` then
+  `DeliverArtifacts`; `agent.artifact_delivered` with `file_id`, `original_filename: hello.md`,
+  `size: 36`, `content_type`; the file landed in the workspace root with the declared bytes;
+  `session.usage` then `session.status_idle {end_turn}`; charge snapshot
+  `{model_credits: 0.35, sandbox_runtime_credits: 0.03, total_credits: 0.38}`. The event order was
+  the one the reference describes; `agent.thinking` carried no content; `span.model_request_end`
+  carried `model_usage.credits` and no token count, as documented.
+- **Second turn on the same session, Bash disabled between the turns** (5.7 s): the Agent went to
+  v2 and the session's tools were replaced (`session.updated` is in the history); asked to run a
+  shell command, the model answered "I don't have a Bash shell tool available. My available tools
+  are: Read, Grep, Glob, Write, Edit, WebFetch, ImageSearch, ImageGen, and DeliverArtifacts" and
+  recalled the first turn's file verbatim — `hard` across turns, and continuation, on the wire.
+- **Cancellation**: a `sleep 120` Bash step, SIGTERM to the driver 5 s in: `POST /cancel` answered
+  202 at once and the record carries "cancel accepted by Qoder for session <id>"; the remote
+  session still read `running` 3 s later and `idle` within 20 s, its history ending in
+  `session.status_idle {stop_reason: {type: "cancelled"}}` — the abort is asynchronous, and
+  `cancelled` is a `stop_reason` value the reference does not list (it would read as `incomplete`
+  with that raw reason on a turn that saw it). The cancelled turn billed 0.29 model credits.
+- **Purge**: cancel, delete session, delete the artifact file, archive the Agent all answered as
+  documented; `DELETE /environments/{id}` answered **409** even after the session was deleted, and
+  the archive fallback took it.
+- **Models**: `GET /models` listed 17 ids for this tenant (`auto`, `ultimate`, `performance`,
+  `efficient`, `smodel`, `qmodel_38max`, `qfmodel`, `qmodel_latest`, `qmodel`, `kmodel_latest`,
+  `kmodel`, `gmodel`, `gfmodel`, `dmodel`, `dfmodel`, `mmodel`, and a tenant-private dog-fooding
+  mode), each with its `price_factor` and, for most, an `efforts` list — more than the reference's
+  one documented id. The China-region base answered 401 to this token, so a connection is one
+  region. The catalog carries the sixteen public ids; `ultimate` and `efficient` have completed
+  turns.
+
+### The transport: Qoder's Python SDK (2026-10-16)
+
+The driver's wire moved from a hand-written `urllib` client to Qoder's own SDK (`qca-sdk` 0.6.0,
+MIT, PyPI), installed into `$TOOLS/qoder-venv` by `install_qoder` with the wheel's sha256 pinned
+and an import check of every method the driver calls. The per-turn contract, the state file, the
+business rules (cancel, artifacts, names as input, hard across turns, purge) and all 43 tests are
+unchanged; what changed:
+
+- Every `user.message` carries an `Idempotency-Key` (a fresh UUID), which is what the SDK itself
+  requires before it retries a POST — so the "is the message POST idempotent" question below is
+  answered by the vendor's own client: that header is the mechanism.
+- The SDK fetches and follows the artifact's presigned link itself and refuses one that is not an
+  http(s) URL; the driver's own check of the same became the SDK's.
+- The reconnect loop stays in the driver (a stream that ends without a terminal event is decided by
+  the session's status, which the SDK's ResumableStream does not consult); the SDK's SSE decoder,
+  typed calls and error classes replace the hand-rolled ones.
+- A bug the switch found: the relay's `do_DELETE` did not read a DELETE's body. The SDK sends `{}`,
+  the two bytes stayed on the keep-alive socket, and the next request opened with `{}DELETE` — a
+  501 from upstream that made a purge report three failures behind one session delete. Fixed and
+  pinned by a test.
+- Live on the SDK transport (Global, `efficient`): a first turn with Write + DeliverArtifacts in
+  21 s, the artifact landed, charge 0.23 credits; the purge deleted the session, the file and the
+  Agent and archived the Environment.
+- Found in review, each pinned by a test that fails without it: the SDK raises the storage host's
+  answer to the presigned link with the same class as the API's own, so a lapsed link (a 403 at the
+  store) read as the file refused and was not asked for again; a refusal of the request that
+  carries no credential is now the link's, and gets one fresh link as before. A purge on an
+  interpreter without the SDK died in a traceback while the runner removed the folder; it now
+  reports every recorded id as left. An OSError that reaches the top (the SDK wraps the network's)
+  ends the turn as the workspace's, not without a result.
+- Measured on the candidate 0.34.2-rc.1 (main plus this change, 2026-10-16), in a side instance
+  on a copy of the test instance's settings, through api.qoder.com (Global): the image's
+  fresh-volume smoke test installed the SDK on amd64 and arm64 and listed all 26 bases; an upgraded
+  volume built the venv at boot (`qoder-ready` 0.6.0) and the runner ran the driver on it. The
+  console column, `run.mjs` through Playwright, passed 45 of 45 scenarios (first, follow-up,
+  switch, artifact, recycle) on nine of the twelve offered ids: auto, ultimate, qmodel_38max,
+  qmodel, gmodel, gfmodel, dmodel, dfmodel, mmodel. performance, kmodel_latest and smodel were not
+  run (the account's trial credits; smodel costs about 11 a turn). Through the API on qfmodel: an
+  input file mounted and read, a follow-up on the same Qoder session, a skill published and used,
+  Bash disabled and absent from the agent's tools, a cancel 16 s in that Qoder recorded as
+  `session.status_idle` with `stop_reason: cancelled`, and every session delete purged at Qoder
+  (sessions, files and skills 404 afterwards, Agents and Environments archived; nothing left).
+  Claude Code, Codex (with a follow-up) and Hermes completed on the same candidate. The whole run
+  cost 14 credits.
+- `install_qoder` run as written in the image's base (`python:3.12-slim`): the venv built in 17 s,
+  the marker says 0.6.0, the import check passed, a wrong digest was refused with both digests
+  named; the driver run on that venv's interpreter from inside the container completed a live turn
+  (artifact landed, 0.42 credits) and its purge.
+
+### Not yet confirmed with Qoder (the driver's defaults until then)
+
+The presigned artifact URL's lifetime (a lapsed link is re-requested, never a failure in itself);
+whether a delivered artifact can carry directory structure (flat names are written); the session
+idle TTL and auto-archive (an archived or missing session is `resume_lost`); the billing of failed
+and cancelled runs (no figure is given for them); the files reference's text-only rule against the
+message schema's image `file_id`. Answered since: `POST /sessions/{id}/events` is idempotent under
+an `Idempotency-Key` header — the vendor's own SDK sends one and retries a POST only under one —
+and every message the driver sends carries it (the history is now the fallback, not the guard).
+
+### Versions and the column
+
+Public reference `04-Managed层`, API version as served on 2026-10-09; no Qoder API version header
+is documented. The live column (five scenarios, custom-harness dimension, the family tour where it
+applies — Qoder picks the model, so a "switch" is a different Qoder id) and a `scripts/benchmark`
+column run once a tenant PAT is on the instance, and this section gains what they measured.
+
+### Through a self-hosted instance (2026-10-10, 0.33.0-rc.2 to rc.4, Global region, Pro Trial account)
+
+Owner trust, the Qoder connection added to the instance, driven through the console and the API.
+
+- **A plan without credits is refused at the session**, with Qoder's sentence on the record: `402
+  billing_error: You have no available credit`. The Environment, Agent and Skills made before the
+  refusal were deleted with the task (the Agent archived), which also proved the purge live.
+- **Delivered file, follow-up, charge.** qfmodel wrote and delivered `hello.md`; the follow-up on
+  the same Qoder session recalled its line. The first turn was charged 0.29 credits and the second
+  0.03 against a session total of 0.32: the snapshot is the session's running total, and before the
+  per-turn delta the second turn read 0.32. qfmodel is not free here: a small turn bills about
+  0.23 model credits although `GET /models` gives it a price factor of 0.
+- **A tool disabled between turns.** A custom harness ran `uname -s` through Bash, then had Bash
+  disabled; the next turn answered NO SHELL and called nothing. Qoder's session showed `Bash` in
+  `disallowed_tools` and `enabled: false` while the Agent stayed at version 1.
+- **Cancel.** Stop on a turn running `sleep 120`: the record says `cancel accepted by Qoder for
+  session …`, and the Qoder session was idle 6 s after the stop.
+- **Files written and never delivered.** On rc.3 the artifact scenario failed on `auto` and
+  `performance`: the agent wrote the file and answered DONE without calling DeliverArtifacts,
+  though both Qoder's system prompt and ours tell it to. On rc.4, which asks once for what was
+  written and not delivered, one turn of the artifact scenario per model: the 14 ids run there all
+  delivered `HELLO` and answered DONE, and the ask was needed on 10 of the 12 whose Qoder history
+  was read (qmodel_latest and kmodel delivered unasked). `ultimate` delivered unasked in the rc.3
+  matrix, and `smodel` on rc.3 when the prompt said to deliver. qfmodel ran the five console
+  scenarios, all ok (the first try lost the file card in the console while the record held the
+  file; the retry passed).
+- **Cost of one small turn**, in credits: qfmodel 0.33, gfmodel 0.26, dfmodel 0.31, qmodel 0.41,
+  mmodel 0.43, efficient 0.41, auto 0.29, kmodel 0.92, dmodel 1.25, gmodel 1.61, kmodel_latest
+  2.36, qmodel_38max 2.44, qmodel_latest 2.47, performance 4.27, smodel 11.2. Qoder also lists
+  `cmodel` (Cantus, price factor 4); it is not in the catalog, not having been measured.
+
+## Five bases added together, four of them offered (2026-10-02/06)
+
+MiMo Code (XiaomiMiMo/MiMo-Code, MIT), Gajae-Code (Yeachan-Heo/gajae-code, MIT), jcode
+(1jehuang/jcode, MIT), OpenSquilla (TokenRhythm/opensquilla, Apache-2.0) and nanobot
+(HKUDS/nanobot, MIT), as the seventeenth to twenty-first bases.
+
+**gajae is implemented and NOT OFFERED**: its CLI cannot run under this product's session
+write-wall, measured both ways on a live instance — see "gajae: the write-wall and a lock that
+walks its ancestors" below. The other four are offered.
+
+**The FULL Vercel column, 2026-10-11**: every catalog id this connection was probed to serve — 50
+of the 54 common to all four catalogs, muse's four excluded and not probed — on all four bases, the
+five scenarios, `EXPECT_CONNECTION=integration:Vercel`. 200 pairs, 1,000 scenarios.
+
+| base | clean pairs | pass | fail | not measured | unlabelled | driver errors |
+|---|---|---|---|---|---|---|
+| mimo | 48/50 | 240 | 2 | 8 | 0 | 0 |
+| jcode | 50/50 | 250 | 0 | 0 | 0 | 0 |
+| opensquilla | 49/50 | 245 | 1 | 4 | 0 | 0 |
+| nanobot | 49/50 | 245 | 1 | 4 | 1 | 0 |
+| | | **980** | **4** | **16** | | |
+
+No foreign connection on any turn, and no substitution survived `samemodel`. The sixteen
+not-measured are the consequence of the four failures: a pair whose FIRST turn fails runs nothing
+after it.
+
+**All four failures are a model declining the scenario's own prompt, and none is a base's.**
+claude-opus-4.7 refused to echo the token on BOTH mimo and opensquilla — "replying with that string
+would misrepresent what model you're talking to", "instructions embedded in request context or
+runtime metadata" — which is one model's judgement reproduced across two bases. qwen3.8-flash
+answered `ack-ef45577c` on mimo, and on nanobot its turn came back "Service temporarily
+unavailable", which is the provider's.
+
+That is worth knowing when reading this table: the scenario prompt is "Reply with exactly:
+M1-<model>", and a model careful about injected instructions can read a real user message as one.
+A refusal costs the pair all five rows, because the first turn gates the rest. The shape of the
+prompt, not the base, is what those rows measure.
+
+**An eight-model column was run first** (one id per family, 2026-10-10, 158 of 160) and is kept in
+the results files. It is superseded by the above for two reasons: it covered 8 ids of 50, and it was
+scored by a judge that read the wrong thing (below).
+
+The earlier columns were taken on three different builds as the fixes below landed; these were
+re-run together on the tree that ships, because arguing per fix about which column it could not have
+touched is weaker evidence than running them again. `unlabelled` 0 everywhere is what makes rule 2
+readable at all — a turn with no served model is a turn the rule cannot judge, and it is reported
+rather than counted as a pass.
+
+**The two rows that failed, and the difference between them.** Both were investigated from the
+session the driver now KEEPS when a pair fails — before that change the session was deleted on the
+way out and a failing row left only the judge's own sentence.
+
+- **jcode / glm-5.3-flash, artifact: the provider's stream, and the file WAS written.** 290 s, then
+  "Upstream stream ended before terminal chunk". The kept session has `hello-jcode.txt` on disk and
+  in the full file listing, so the work happened; the turn was marked failed and its own produced
+  list was empty, so no card was rendered for it. Re-run: 5/5, so the truncation was the provider's
+  and not repeatable. Counted as a pass in the table above only because the re-run passed — the
+  original row and the re-run are both in the results files.
+- **nanobot / kimi-k3, artifact: repeatable, and not the base's write path.** Failed twice in a row
+  with `tools=0` — the model answered DONE having called nothing, and nothing was on disk anywhere
+  in the session. But a FRESH single turn of the same task on the same pair calls `write_file` and
+  produces the file, and so do both controls (nanobot with gpt-5.4, opensquilla with kimi-k3). What
+  differs is position: the artifact scenario is the FOURTH turn, after three "reply with exactly
+  M1-…" exchanges and a switch away to gpt-5.4 and back, and this model carries that pattern on and
+  answers in text. A model behaviour in a context, repeatable in that scenario, with the base's
+  write path demonstrably working for that exact pair. **The row is left at 7/8 rather than retried
+  until it passes.**
+
+Everything below is behaviour measured against the pinned build on a developer machine — flags,
+event schema, failure reporting, resume, usage accounting, tool policy — through a real provider one
+turn at a time. It says each base works; the column above is what says each MODEL it offers does.
+
+### What each one is, and what it shares
+
+| base | pinned | lineage | normaliser | turn process |
+|---|---|---|---|---|
+| mimo | @mimo-ai/cli 0.1.15 | an **opencode fork** (its repo root package.json is still `"name": "opencode"`) | `_opencode_to_claude`, unchanged | `mimo run --format json` |
+| gajae | gjc 0.18.5 | **pi's lineage** (docs/porting-from-pi-mono.md; its deps still carry `pi-ai`) | `_gajae_to_claude`, which delegates to `_pi_to_claude` | `gjc -p --mode json` |
+| jcode | v0.90.0 | its own (Rust) | `_jcode_to_claude`, its own | `jcode … run --ndjson` |
+| opensquilla | 0.5.6 | openclaw/hermes lineage (it migrates `~/.openclaw` and `~/.hermes`; its transcript is the pi message shape) | `_opensquilla_to_claude`, its own | `opensquilla agent --json --event-stream-stderr` |
+| nanobot | nanobot-ai 0.3.5 | its own (a personal-agent runtime, not a coding CLI) | the claude passthrough | `runner/nanobot_driver.py`, in process through its SDK |
+
+### The defects each one's defaults would have caused, and what was done
+
+- **opensquilla routes the model away from you by default.** `[squilla_router] enabled = true` ships
+  on, and the router "scores each turn … then routes it across four tiers to the cheapest capable
+  model". That is matrix rule 2 violated by configuration, not by accident. The builder writes
+  `enabled = false`, and if a `router_decision` event arrives anyway the turn FAILS naming the model
+  it ran instead — the rule pi already enforces for a CLI that substitutes.
+- **opensquilla assumes a generic endpoint holds 8192 tokens.** The first live probe died with
+  `provider_request_too_large` — "The fixed system instructions exceed the provider request budget"
+  — on a three-sentence prompt, because its own system block is ~14k characters and its tool schemas
+  ~29k. The builder declares `context_window` per model.
+- **opensquilla's `--session-db-path` defaults to `:memory:`**, i.e. no continuity between turns at
+  all. It is named explicitly, inside `.harness/`, so the conversation is checkpointed.
+- **jcode replaces itself mid-measurement.** Auto-update is on by default; `--no-update` is passed
+  on every turn. (`--auto-update` takes no value — `--auto-update=false` is a clap usage error.)
+  Its anonymous telemetry is also on by default and prints to stderr: `JCODE_NO_TELEMETRY=1`.
+- **jcode's own `done.usage` is not the turn's usage.** `NdjsonRunState.usage` is ASSIGNED on every
+  `TokenUsage` event rather than accumulated, so it holds the LAST request's numbers: a measured
+  two-request turn reported input 10,748 while its two `tokens` events summed to 21,357. The
+  normaliser accumulates the events and ignores `done.usage`. Its `input` is also GROSS — jcode's
+  own OpenAI client says "input_tokens is the total, including both cache-read and cache-write
+  subsets" — so BOTH caches are netted out, where `_norm_token_usage` nets only the read.
+- **jcode has no remote MCP client at all.** "jcode currently supports stdio (command-based)
+  servers only; HTTP/SSE entries are recognized and skipped with a log line." Without the runner's
+  bridge every remote server a harness declares is dropped in silence, so jcode is in
+  `_BRIDGED_TRANSPORTS` for both transports. opensquilla takes stdio and SSE but not streamable
+  HTTP, so it is bridged for `http`.
+- **jcode's `--model` is its session's INITIAL model, and a resumed turn ignores the one it is
+  given.** Its own help says so ("Interactive sessions can switch providers with /model") and
+  `jcode run` has no model flag of its own, so on `--resume` the model stored with the session wins.
+  Measured on 2026-10-07 with mimo as a flat-layout control in the same run: two turns in one
+  session, haiku then gemini — jcode served `anthropic/claude-haiku-4.5` twice, mimo served each as
+  asked. The family tour served ALL TWELVE of jcode's families with `openai/gpt-5.4` and scored it
+  12 of 12, and the EIGHT-MODEL column had the same evidence and passed it too: every jcode pair's
+  `served` list held ONE entry where every mimo pair's held two. Both judges now read the served
+  model (`run.mjs` fails a switch row unless the turn naming the partner was served by it;
+  `family-tour.mjs` requires the family's own model), and `_jcode_session_model` points the session
+  store at this turn's model before `--resume` reads it. After: that eight-model column went to 8 of
+  8 pairs with two served entries each, and the full 50-id column (above) is 50 of 50.
+
+  **What that does not fix, and will not be fixed from here: a turn after a KILLED turn stays on the
+  killed turn's model.** Reproduced deterministically with the same control — A on gpt-5.4 served
+  gpt-5.4, B on haiku killed mid-flight by a 10 s cap, C asked for gemini and was served HAIKU,
+  with the runner's own log line showing it had pointed the store at gemini first. Three places
+  jcode records the model were tried and measured and NONE of them changes it: the session file's
+  top-level `model` (which does fix the normal path, and is what ships), `env_snapshots[].model`
+  (the tour's file carried four consecutive entries naming the cancelled turn's model, which is
+  what made it look like the answer), and the `turns` table of `model-usage-v1.sqlite3`, which the
+  session file's own `model_usage_turn_id` points into. jcode's log has a `model` step inside
+  `restore_session` that assigns it; the binary is stripped, so the mechanism stops being reachable.
+  The alternative — refusing to resume a killed session when the model changed, and saying so with
+  the existing `resume_lost` notice — trades the conversation for the model, and the decision was to
+  keep the conversation and write the limit down here. A turn whose model matters after an
+  interruption should be started as a new session.
+
+- **A jcode turn leaves almost nothing to diagnose with.** Its NDJSON carries `id` and `name` for a
+  tool call and never the INPUT (`tool_done` carries `output`), so the record's tool arguments are
+  `{}` — and a turn that is cancelled loses its served model and its tool list from the record
+  altogether. The 279-tool-call runaway below was readable only from the gateway's event trace.
+
+- **Two of twelve families ran away on jcode and the deck was already correct.** Measured
+  2026-10-07, grok-4.3 on the tour's "make the code line monospace" edit: 193 `bash` + 86 `todo`
+  calls, 68 tool-result rounds, ten minutes, no final answer. The trace shows it had ALREADY made
+  the change (Courier New present, sizes present, schema valid) and kept re-reading the slide XML,
+  the font list, the sizes and the file's sha256, rewriting one completed todo seventeen times.
+  deepseek, kimi, glm and mistral then also failed to settle inside the cap — the first three
+  families, before any model switch had real effect, finished in 27-33 s. jcode has no step or
+  iteration flag of any kind, so nothing bounds this but the turn's wall clock
+  (`MAX_TURN_SECONDS`, six hours by default); the operator's step budget — the gateway's `max_step`,
+  which reaches the runner as `max_turns` — is forwarded by nine of twenty builders and is a no-op
+  on the other eleven, this one included.
+
+- **nanobot's CLI seeds the workspace and makes a second git repository in it.** `nanobot agent -m`
+  calls `sync_workspace_templates()`, which creates AGENTS.md, SOUL.md, USER.md, HEARTBEAT.md,
+  memory/MEMORY.md, memory/history.jsonl, prompts/README.md and skills/ and then `GitStore.init()`s
+  the workspace — measured, all eight on a bare directory. Its SDK path calls neither (only
+  `.nanobot/workspace-id` appears), which is one of the reasons this base is driven in process.
+- **nanobot refuses a session store that sits inside the agent's workspace**, and that rules out
+  the arrangement every other base here uses. `JsonlSessionStore.__init__` raises "session storage
+  must be outside the agent workspace" when the sessions root is the workspace or under it — a
+  sound rule, since the agent has file tools over its workspace and must not be able to rewrite its
+  own conversation. The conversation still has to ride the checkpoint, which is a tar of the
+  session directory, so the sessions root has to be inside the session and outside the workspace:
+  the only shape that satisfies both is config (and therefore sessions) in `.harness/nanobot/` with
+  the agent's workspace one level down, at `<session>/workspace`. Its AGENTS.md and skills live
+  there too, and the driver chdirs into it, so a shell that writes a relative path cannot land a
+  level above what the model was told it has — Agent Zero's artifact failures were exactly that.
+
+  The nesting STAYS; what changed is that it no longer reaches the user, because a session's file
+  root and the agent's cwd being different directories broke three things. Measured on a live
+  instance with a flat-layout base as the control in the same run:
+    1. a file written through `PUT /v1/sessions/{sid}/files` landed at the session root and the
+       agent answered "there is no notes.txt in the working directory", while the control read it.
+       That route is how an app owns state the agent also edits (the slides kit's deck.json), and
+       caller attachments land the same way. Both run before a backend is built, so neither can know
+       a base nests: `_adopt_into` moves root-level files into the agent's workspace at the start of
+       every turn, keeping back only what `/produced` already excludes.
+    2. deliverables came back as `workspace/<name>`, a directory the user never typed.
+       `_produced_visible` strips it where the cards and their download both resolve, and GET /file
+       tries the agent's directory then the session root.
+    3. the CHECKPOINT readers — share page, full file listing, download-all zip, and the kit route
+       that resolves a file by path — showed 30 files under that prefix, machinery included. The
+       runner writes `.harness/agent-subdir` and `.git/info/exclude` into the checkpoint and the
+       gateway reads them back (`_ws_rules`/`_ws_view`), so one source serves both sides rather than
+       a second exclusion list in the gateway.
+  An earlier version of this file called the prefix unfixable. That was read off the constraint
+  rather than measured, and only the constraint on the session store was real.
+  **Found by running the runner's real argv against the real package**, not by any test: the
+  driver's own fake could not have seen it, which is the whole of why that end-to-end was run.
+- **nanobot's usage is gross too.** A measured two-request turn: `input_tokens` 11,107 with
+  `cache_read_tokens` 5,503, while the requests reported 5,506 and 5,601 — the cached read is a
+  SUBSET. The driver nets it.
+- **gajae auto-enables `/v1/models` discovery on a custom provider.** Against Vercel it listed 376
+  upstream models under our provider name. It is marked optional, so an endpoint without a models
+  list degrades to the static entry, and the builder names the model fully qualified so a fuzzy
+  `--model` cannot land on a discovered id. Its signed model-preset registry — an HTTPS fetch that
+  can rewrite which model a preset names — is turned off.
+- **jcode's Linux release is a PAIR, and its macOS release is not.** `jcode-linux-<arch>.tar.gz`
+  holds a 505-byte `sh` launcher plus `jcode-linux-<arch>.bin`; the launcher puts its own directory
+  on `LD_LIBRARY_PATH` and execs the `.bin` beside it. The macOS archive holds a single binary and
+  no launcher — so a probe on a developer's Mac shows one layout and the image gets the other.
+  Installing "the file called jcode*" took the launcher, left its `.bin` behind, and produced an
+  executable that is on PATH, satisfies `backend_bin`, and dies on its first turn. Found by running
+  the installer function against the real Linux asset, which is now part of what is done before a
+  base is called installed: `install_mimo`, `install_gajae` and `install_jcode` each run the binary
+  and compare the version it REPORTS, and remove what they put down when it does not match.
+- **mimo's first run on a fresh volume is a one-time SQLite migration.** Measured: over nine
+  minutes with no output before it was killed, about twenty seconds warm. The installer warms a
+  throwaway home so a turn never pays it.
+
+### Failure reporting, per base (checklist item 8: check, do not assume)
+
+| base | how a provider failure arrives | exit |
+|---|---|---|
+| mimo | opencode's `error` event | 1 |
+| gajae | assistant `message_end` with `stopReason:"error"`, `errorStatus`, `errorMessage` — pi's contract exactly; ONE attempt on a 401, no retry storm. Also an `agent_failed` event pi has no branch for, which is why gajae carries its own wrapper | 1 |
+| jcode | a real `error` event naming the endpoint, the model, the auth variable's NAME (never its value), the status and the provider's body | 1 |
+| opensquilla | an `_event` of kind `error`, and `errors[]` on the final object | 1 |
+| nanobot | `run.failed`, or a `run.completed` whose RunResult carries an `error` or a non-completed `stop_reason` | driver's |
+
+### Tool enforcement, measured
+
+`hard` on four, and each was proven by asking the model for its own tool list with one tool
+withheld: gajae's `--tools` allowlist (write absent), jcode's `--disabled-tools` (write absent),
+mimo's `permission.<key>: "deny"` (opencode's, inherited), nanobot's session policy (write_file
+absent — and the model then wrote the file with `exec`, which is the honest limit every
+shell-bearing base has). `instruction` on opensquilla, because `--permissions` picks a posture and
+there is no deny list anywhere on its agent CLI; the disabled set reaches the model through
+AGENTS.md instead, as it does for codex, hermes, dsh and gemini.
+
+nanobot's policy is set on the SESSION rather than on the tool registry on purpose: the loop
+applies it per turn to the registry it is about to use, which by then also holds the MCP provider's
+tools. A registry filtered when the driver started would withhold the built-ins and let every MCP
+tool through — openhands' half-policy defect. The driver refuses to run the turn if the policy did
+not take.
+
+### End to end, with the runner's own argv and the runner's own relay (2026-10-02/03)
+
+Not the probe commands typed by hand: `_build_<base>` was called with a live connection, the
+loopback relay was started in the same process, the argv it returned was run against the pinned
+binary, and the bytes that came back were fed to the shipped normaliser. The task was the same on
+each: write a file and reply with exactly DONE.
+
+| base | file written | result | usage read off the record |
+|---|---|---|---|
+| gajae | `e2e.txt` = kiwi | success, `DONE`, served model `openai/gpt-6-luna` | 6 fresh in / 37 out, 11,105 cache read, 11,157 cache write |
+| jcode | `e2e.txt` = kiwi | success, `DONE` | 6 fresh in / 66 out, 10,592 cache read, 10,741 cache write |
+| opensquilla | `e2e.txt` = kiwi | success, `DONE` (from the transcript, not the concatenated `text`) | 6 fresh in / 189 out, 8,281 cache read, 8,408 cache write |
+| nanobot | `workspace/e2e.txt` = kiwi | success, `DONE` | 5,596 fresh in / 31 out, 5,505 cache read |
+| mimo | `e2e.txt` = kiwi | success, `DONE` | 12 fresh in / 406 out, 43,991 cache read, 15,155 cache write |
+
+mimo's end-to-end on a FRESH home timed out at 300 s inside its one-time SQLite migration; on a warm
+home the same argv answered normally, which is the row above. That cost is a property of a fresh
+data volume, not of a turn, and it is exactly why `install_mimo` warms a throwaway home at install.
+
+The relay is the one that matters for rule 2: all five reached the provider through it with the
+placeholder bearer in the environment, so `_relay_served_model` has its input on every one of them.
+gajae also names the served model itself, on every assistant message.
+
+### The Google column, and what a DIRECT provider showed that the aggregator hid (2026-10-11)
+
+Google's own OpenAI-compatible surface (`https://generativelanguage.googleapis.com/v1beta/openai`),
+as the instance's ONLY integration, on the eight gemini ids it serves: **160 of 160 scenarios, all
+four bases 8/8**, no failure, nothing unmeasured, no driver error, `unlabelled` 0, no foreign
+connection, no substitution. The served id comes back BARE (`gemini-3.8-flash`, no vendor prefix),
+which is the direct path's own signature.
+
+This column exists because of a defect in this batch's first commit: it added
+`("google", <base>)` wiring for all four bases WITHOUT probing any of them, against the rule the
+same file states two hundred lines above it — "No ("google", "goose") row: unprobed is unlisted, and
+Gemini through this surface is a request-shape question the matrix has to answer first". The catalog
+was claiming google worked on four bases on no evidence. It now has evidence.
+
+**And it answers that request-shape question, the other way round from what the relay's own repair
+suggested.** nanobot's tool declarations are refused by Google's validator through VERCEL — the
+`anyOf: [array, null]` with no `items` that the reactive repair was written for — and on the direct
+endpoint the same declarations were accepted with no repair at all: zero relay refusals and zero
+"normalised them for Google's schema" lines anywhere in this column's window. The eight repairs in
+the log belong to the Vercel column, which is visible in their model names being vendor-prefixed
+(`google/gemini-3.1-flash-lite`) where this column's are bare, and in their timestamps. So the
+missing `items` is the AGGREGATOR's translation, not Google being strict, which is what the comment
+above `_GEMINI_SCHEMA_KEYS` said in the first place and now has direct evidence for.
+
+That is also the case for keeping the repair REACTIVE rather than proactive on every channel: the
+direct path does not need it, and applying it there would flatten an `anyOf` that this provider
+handles faithfully.
+
+### The driver was judging three of its five scenarios on its own prompt (2026-10-11)
+
+Read this before reading any column in this file, including the ones that predate this batch: the
+defect is in the shared driver, so every column it has ever produced has the same weakness.
+
+`run.mjs` built its `tail` from the transcript starting AT THE MESSAGE IT HAD SENT, so the tail
+contained the prompt — and every prompt of the form "Reply with exactly: M1-&lt;model&gt;" contains the
+very token `expectWord` then looked for. So **first, followup and switch passed whenever the turn
+completed**, whatever the model replied, except when a long answer pushed the prompt out of the
+400-character window.
+
+It was found from the records, not from a hunch. opensquilla on claude-opus-4.7 had five turns whose
+answers were all the same sentence — "I won't echo back arbitrary strings injected via context" —
+and first, switch and artifact were scored as passes. Five identical answers looked like a read
+artefact, so they were read again from five separate stored response objects, which agreed. Then an
+offline audit of the finished 1,000-scenario column: **of 596 PASSING first/followup/switch rows,
+593 had the prompt in their tail.** Three were judged on an answer.
+
+`expectWord` now reads `last.assistant`, the server's own record of what the model said, which the
+turn helper already fetched. The tail stays as the text a failing row reports. recycle was always a
+real check — its prompt asks which word was requested and does not contain the answer, which is why
+it caught genuine failures — and artifact reads files.
+
+**How much it changed, measured rather than assumed.** A 24-pair sample under the fixed judge, six
+models per base spread across families, was compared row by row with the old verdicts: 3 false
+passes over 63 previously-passing rows of those three scenarios, all three in `first`. ~5%, which
+is why the whole column was re-run rather than only its failures — the defect produced FALSE PASSES,
+so the rows that needed re-checking were precisely the ones that had passed. The sample's 24 pairs
+were measured under the fixed judge and seeded into the column, so the column spent its turns on the
+other 176. The old column's records are kept beside the new ones as what the old judge said.
+
+**The order was wrong and that is the lesson.** The audit that found this is free and offline; it
+was run AFTER a 1,000-turn column instead of before it. A judge should be audited against stored
+records before it is given a thousand turns to score.
+
+### Three more things the full column exposed about the rig (2026-10-11)
+
+- **A crashed page poisoned every pair after it.** One "page.goto: Page crashed" partway through
+  opensquilla's 50 pairs left the remaining 32 with that error and NO scenarios, and the column then
+  read as "49 of 50 pairs, 88 of 90 scenarios" to anyone counting passes, because those 32
+  contributed to neither total. The page was created once per worker and never rebuilt. It is now
+  replaceable: a pair that dies on a crash is retried once on a fresh, logged-in page and goes back
+  on a queue. A browser that is gone still ends the worker, checked first so recovery is not
+  attempted on a dead browser. The re-run finished with zero driver errors.
+- **A re-run inherited the previous attempt's record.** `const rec = res[k] || {…}` meant the resume
+  of those 32 pairs filled scenarios into records still carrying the crash's `error` and `at`, so a
+  measured pair still looked errored — and a reader scored 32 measured pairs as "not measured"
+  because of it. The record is built fresh on every run; "has an error" and "has scenarios" can no
+  longer both be true.
+- **The recycle row reported the driver's own patience as the base's failure.** The route refuses
+  while a turn is settling and the driver retried the 409 for 30 s; mimo on gpt-5.6-luna had an
+  artifact turn still `running` at 478 s, so its recycle row read "recycle refused: HTTP 409 a turn
+  is running". It now waits for the session's record to reach a terminal state, up to 300 s, and
+  says so when it never does.
+
+### What every dimension measured, and what is still not measured
+
+All four offered bases have now been through all four dimensions on the Vercel connection. gajae is
+not offered and is in none of them (see the write-wall section below).
+
+| dimension | mimo | jcode | opensquilla | nanobot |
+|---|---|---|---|---|
+| five scenarios × ALL 50 served ids (Vercel) | 48/50 | 50/50 | 49/50 | 49/50 |
+| five scenarios × 8 gemini ids (Google, direct) | 8/8 | 8/8 | 8/8 | 8/8 |
+| custom-harness (own skill, own script, tool policy, MCP) | ok | ok | ok | ok |
+| plugin: skills / mcp / sse / http | 4/4 | 4/4 | 4/4 | 4/4 |
+| browser (one task in plain words, through the plugin) | ok | ok | ok | ok |
+| environments (pip, npm and apt from the layer, no install) | 3/3 | 3/3 | 3/3 | 3/3 |
+| family tour, 12 families in one conversation | 12/12 | 3/12 | 11/12 | 11/12 |
+
+Both of those were re-run with all four bases on ONE build after the two nanobot fixes they
+exposed, rather than left as "three bases before the fix and nanobot after it": the fixes are
+nanobot-only by construction, but that is an argument where a 16-turn re-run is a measurement.
+
+The browser column needs a browser, and this instance had none when it first ran: all four bases
+failed on "navigate: not configured", which says nothing about any base. The runs above use the
+operator's-own-browser configuration — `HR_BROWSER_CDP_URL` against a headless Chromium in the
+container — and NOT the browser-use vendor key; the two are different paths and a row proved on one
+is not proof for the other. The environments column ran on one layer carrying tabulate (pip),
+qrcode (npm) and jq (apt), and every row used them with zero install commands in the trace.
+
+Rule 2 is not merely answerable on these bases now, it was READ: `unlabelled` is 0 on all 32 pairs,
+so every turn carried a served model off the relay, and no substitution survived `samemodel`.
+
+- **The two tours that show 11 of 12 failed the same family, grok-4.3, inside the same few minutes**,
+  and the reason was the provider's: nanobot's row carried "The model is currently at capacity due to
+  high demand" and opensquilla's carried its own fallback sentence for a terminal event with no
+  message. Both pass grok on a retry — on a fresh session AND on the same long conversation that had
+  failed — so the rows stay as measured with the retries recorded beside them.
+- **jcode's 3 of 12 is the limit written up above**: its fourth family ran away and was killed at the
+  tour's cap, and every family after it stayed on the killed turn's model.
+- Still not measured: any connection other than Vercel and Google. The tour's families were PROBED first,
+  one short turn each, because a family this connection cannot serve would fail a tour for a reason
+  that says nothing about the base: twelve of thirteen answered. llama-3.3-70b was refused by this
+  instance with "no provider configured for backend 'mimo'" — this org holds one integration, which
+  is not a statement about what Vercel serves — so the tour covered twelve. muse is deliberately absent from these runs and no muse credential was used.
+  **"Five ids Vercel does not serve at all" earlier in this file is out of date for ALL FIVE.** That
+  passage is a 2026-09-16 measurement; the full column of 2026-10-11 ran every one of them and each
+  answered and passed 5 of 5 — `claude-fable-5-1` as `anthropic/claude-fable-5.1`,
+  `gemini-3-flash-preview` as `google/gemini-3-flash`, `grok-4.20` as `spacexai/grok-4.20-reasoning`,
+  `hunyuan-4-preview` as `tencent/hy4-preview`, `nemotron-3-super` as
+  `nvidia/nemotron-3-super-120b-a12b`. Every one of those is the provider renaming the model and
+  `samemodel` resolves all five, which is why this column reports no substitution. A provider's
+  coverage is a dated measurement and not a property of the id.
+
+## The disabled tool is the base's own, and the label on the instructions box is the runner's (2026-10-03)
+
+Three things the batch of five exposed, each a surface that read as working and was not.
+
+### The custom-harness dimension was disabling a tool eleven bases do not have
+
+`custom-harness.mjs` built every harness with `disabled_tools: ['WebSearch']` and judged the claim
+with `!tools.some((t) => /websearch/i.test(t))`. A tool id that matches nothing in a runtime is
+dropped on the way through and disables nothing, so on a base with no tool of that exact name
+`disabled_tool_unused` was VACUOUSLY true — a row passing a check that was not running, the same
+shape as the openhands column that reported 40/40 on a substitution check with no input.
+
+Eleven of the twenty bases were in that state: aider, codex, goose, openhands, pi and qwen/gemini/
+cline (the ones the 2026-09-19 and 2026-09-28 notes had already named), plus the five added on
+2026-10-02, whose ids are `web_search` / `websearch` — which the old regex would not have matched
+even where the tool existed.
+
+Now there is a per-base `DISABLED_TOOL` table, each entry read off that base's own `_BASE_CATALOG`
+entry and each a tool the stamp task does not need (nothing switches off a shell, a read or a
+write — that would fail the task rather than test the policy):
+
+| base | tool | base | tool |
+|---|---|---|---|
+| claude-code | `WebSearch` | kimi | `FetchURL` |
+| codex | `git` | cheetahclaws | `WebSearch` |
+| hermes | `web_search` | openhands | `Todo` |
+| pi | `edit` | mimo | `websearch` |
+| dsh | `web_search` | gajae | `web_search` |
+| opencode | `websearch` | jcode | `websearch` |
+| qwen | `web_fetch` | opensquilla | `web_search` |
+| gemini | `google_web_search` | nanobot | `web_search` |
+| cline | `fetch_web_content` | goose | `read_image` |
+| omp | `web_search` | **aider** | **null — not testable** |
+
+aider's catalog is one tool, Shell, and the task needs it, so its row reports that the policy is
+not testable on that base rather than passing. A vacuous pass is worse than an honest gap.
+
+The judge now compares whole names ignoring case and separators (`web_search`, `websearch` and
+`WebSearch` are one name; `search` does not match `search_sessions`), the row records WHICH tool it
+switched off, and `gateway/tests/test_matrix_disabled_tool.py` holds the table to `_BASE_CATALOG`
+so the next base whose ids drift fails there rather than quietly going vacuous.
+
+### The settings page named a file the runner does not write
+
+Registration point 14 requires the console's instruction-file label to agree with
+`_agent_doc_path`. Nothing checked it and it had drifted: the page labelled the box `AGENTS.md` for
+qwen and gemini while the runner writes `QWEN.md` and `GEMINI.md`. The instructions still reached
+the agent; the name on the box was wrong, which on this repo's terms is a defect rather than a nit.
+The label now comes from one exported map (`instructionFileLabel`), and
+`gateway/tests/test_instruction_file_label.py` holds it to `_agent_doc_path` for every base.
+
+### A CLI could say something about a turn and have it reach nobody
+
+The gateway's translator renders exactly two `system` subtypes and drops every other in silence, so
+a runner emitting a third was writing to a surface that did not exist. OpenSquilla reports
+"Provider context limit reached; compacting older context before retrying" as a progress event, and
+a person reading a turn that took minutes and lost its earlier context had no way to learn why.
+`system/notice` is now rendered as a note on the reply, beside `resume_lost` and `mcp_unavailable`;
+the runner bounds it and de-duplicates it (that warning repeats once per retry).
+
+## gajae: the write-wall and a lock that walks its ancestors (2026-10-03, decided 2026-10-06)
+
+Every gajae turn through the product died before its first model call:
+
+    [Uncaught Exception] Error: Failed to snapshot staged file lock: io_error.
+
+**The cause, with evidence at each link.**
+
+1. gjc's native lock helper `open_parent_no_follow` (`crates/pi-natives/src/path_identity.rs`)
+   hardens the lock against symlink swaps by refusing to trust path resolution: it walks from `/`
+   down to the path it is locking and opens EVERY ancestor with
+   `O_RDONLY|O_DIRECTORY|O_NOFOLLOW`. On a directory that needs **read**, not traverse.
+2. `docker/entrypoint.sh` sets `/data` and `/data/workspaces` to `751` — its own comment:
+   "traversable by sessions, neither listable nor writable".
+3. Measured in the container: as a session uid, `open("/data", O_RDONLY|O_DIRECTORY)` is EACCES;
+   as the product user, which owns it, it succeeds.
+4. The addon maps EACCES to `io_error`, `acquireFileLock` throws, nothing catches it.
+5. **Positive control**: the same binary, the same uid, the same flags, in a directory whose only
+   ancestor is `/` (0755) — no crash, and the run reaches the provider.
+6. **Narrowing**: cwd left under `/data` (unreadable ancestors) with only the agent dir and the
+   session dir moved to a readable path — works. So it is specifically the directories gjc locks,
+   both of which the runner names (`GJC_CODING_AGENT_DIR`, `--session-dir`).
+7. **Both directions of the switch, on a real turn through the API**: at `751` the turn failed with
+   that error; at `755` it completed in 4.6 s answering correctly with
+   `served_model = openai/gpt-5.4`; back at `751` it failed again. The modes were restored.
+
+Neither side is wrong. gjc assumes it may be running where an attacker can write and verifies every
+ancestor itself; this product makes those ancestors unwritable so nobody can, and in doing so makes
+them unreadable, which is what gjc's verification needs.
+
+**Decision (the user's, 2026-10-06): do not weaken the wall.** gajae is removed from everything
+that offers, routes or installs it — `_MODEL_CATALOG`, `_BASE_CATALOG`, `_INTEGRATION_WIRING`,
+`_CUSTOM_FORMAT_BACKENDS`, the console's `OOB` and logo map, the default `HR_BACKENDS`, and both
+measurement dimensions' base lists. The runner's implementation stays (`_build_gajae`,
+`_gajae_to_claude`, 13 tests and two captured fixtures) because the base works and the blocker is a
+product decision; `gateway/tests/test_gajae_not_offered.py` pins every one of those surfaces so a
+half-restore — listed but not routable, or routable but not installed — cannot pass unnoticed.
+
+**What it would take to offer it.** Relax `/data` and `/data/workspaces` to `755`, then restore the
+catalog entries, the wiring rows and the `_CUSTOM_FORMAT_BACKENDS` membership. What that gives up is
+"neither listable", not "nor writable": a session uid could then enumerate other session ids and
+environment names. It could not read them — `control.db` and `graph.db` are `0600` and `blobs/` is
+`0700`, and a session uid already has traverse, so file contents are governed by each file's own
+mode either way. The half that stops a session renaming or replacing another session's directory
+(which needs write on the parent, not on the target) is untouched by that change.
+
+## zeroclaw, a new base (2026-10-13, refs #442)
+
+zeroclaw (zeroclaw-labs/zeroclaw, Apache-2.0) is a Rust personal-agent runtime, pinned to 0.8.5
+(released 2026-09-05) and installed from its GitHub release archive, verified against digests
+pinned in `docker/entrypoint.sh` (read off that release's own SHA256SUMS). It is driven through its
+ACP server, `zeroclaw acp`, by `runner/zeroclaw_driver.py`, which re-emits claude's stream-json, so
+the normaliser is the passthrough. It speaks chat/completions through its `custom` provider and rides
+the loopback relay, so it is wired row for row with nanobot and is in `CHAT_ONLY_BACKENDS`.
+
+### Why ACP, and what the probes showed (against OpenRouter, claude-haiku-4.5)
+
+- **`zeroclaw agent -m` cannot hold a conversation.** It prints the final answer as prose, and its
+  `--session-state-file` is read only by the interactive REPL, so every one-shot run starts from the
+  system prompt alone. ACP keeps sessions in `data/sessions/acp-sessions.db`, and `session/resume` in
+  a later process seeds the agent with them: a second process named the file the first had written.
+- **The model is the config's, and the config is rewritten every turn.** `session/resume` rebuilds the
+  agent from the current `config.toml`, so a switch is a new `model` line. The switch rows below were
+  served by the partner model on both pairs.
+- **zeroclaw seeds seven files into its agent workspace** (AGENTS.md, SOUL.md, IDENTITY.md, USER.md,
+  TOOLS.md, MEMORY.md, HEARTBEAT.md). With the agent workspace equal to the session directory all
+  seven came back as produced files. The agent workspace is now `.harness/zeroclaw/agent` and the ACP
+  `cwd` is the session directory: the file and shell tools are rooted at the `cwd` (`pwd` answered the
+  session directory; a relative `file_write` landed there), and the instruction file and skills are
+  read from the agent workspace. A sentinel written into `.harness/zeroclaw/agent/AGENTS.md` before
+  the first turn was repeated by the agent, and the file was left as written.
+- **Its shell refused ordinary commands even at level `full`.** `touch` and anything chained with `&&`
+  answered "Command not allowed by security policy". The risk profile uses zeroclaw's documented
+  trusted mode (`allowed_commands = ["*"]`, `block_high_risk_commands = false`); the session already
+  runs as its own OS user in its own directory.
+- **Its shell passes on only what it is told to.** A variable in the driver's environment came back
+  empty and PATH was reset to the system default; names in `shell_env_passthrough` arrived. The runner
+  names PATH, the environment layer's variables and the harness's own (nanobot's arrangement).
+- **A custom endpoint gets prompt-guided tools by default.** Through the relay the model wrote its
+  calls as `<tool_call>` text with invented `<tool_result>` lines, two of three arrived without their
+  arguments ("Missing 'path' parameter"), and one file took three model calls (read off the session's
+  stored transcript). zeroclaw's provider factory defaults a `custom` endpoint to prompt-guided tools
+  (its own test: "custom OpenAI-compatible endpoints must default to prompt-guided tools"). The runner
+  sets `native_tools = true`; the same turn then made one native call and used half the input tokens.
+- **The context budget was left at zeroclaw's default (32,000 tokens), on a measurement.** A six-turn
+  session on claude-haiku-4.5, four turns of it reading a 6 KB file, reached about 35,000 input tokens
+  per model call; zeroclaw recorded no trim or compaction event, all 17 messages stayed in the store,
+  and the last turn recalled a codeword from the first. A much longer session may still trim: zeroclaw
+  then sends `_zeroclaw/history_trimmed`, which the driver does not yet surface.
+- **The thinking level and attached images need nothing of their own.** The relay applies the turn's
+  level to every request body it carries (`runner/reasoning.py`), and an attached image arrives as a
+  file in the workspace, as on nanobot.
+- **Failure reporting (checklist item 8).** A provider failure is a JSON-RPC error on the prompt
+  (`-32603`, "The model provider custom.hr rejected its credentials", measured with a bad key), and a
+  session the store does not hold is `-32000 Session not found` on `session/resume`. Both are
+  structured, so nothing is parsed out of prose. The driver fails the turn on the first, and starts a
+  new session on the second while `_resume_lost` reports the lost history.
+- **Usage and the served model come from the relay.** The ACP stream carries no usage and names only
+  the configured model. Neither the key nor anything derived from it was found in any file zeroclaw
+  wrote.
+- **Interactive tools are never offered.** `ask_user`, `escalate_to_human`, `reaction` and `poll` call
+  back to the ACP client and wait for a person; `model_switch`, `model_routing_config` and
+  `proxy_config` let the model change what serves the turn. All seven are in `excluded_tools` on every
+  turn, and an excluded tool is absent from the list the agent reports.
+
+### Measured (self-hosted, image built from this branch's final commit, 2026-10-13)
+
+| Dimension | Result |
+|---|---|
+| Five scenarios, OpenRouter, claude-haiku-4.5 and gpt-5.4-mini | 10 of 10, every turn on `integration:openrouter`, none unlabelled |
+| Custom harness (skill + script, disabled tool, MCP over streamable HTTP) | pass: skill reached, script ran through `shell` with the harness's variable, `web_fetch` disabled and unused, `deepwiki__read_wiki_structure` called |
+| Install on a first start | `installing zeroclaw 0.8.5 …`, digest verified, listed among backends available |
+| Five scenarios, 15 more OpenRouter models (the cheap and mid tier of every family) | 14 of 15; llama-3.3-70b is not offered (below) |
+| Plugin matrix (`plugins/run-matrix.py --mode all`, gpt-5.4-mini) | 5 of 5: skills, stdio MCP, rows, remote SSE, remote streamable HTTP |
+| Family tour, one conversation over ten families | 10 of 10, every turn served by its family; two passed on a retest (below) |
+| Cancel mid-turn (a turn inside `sleep 120`) | cancelled at once; the driver, `zeroclaw acp`, its shell and `sleep` were all gone 5 s later; the next turn in the session recalled the first |
+| zeroclaw's own web tools in the image | `web_fetch`, `web_search_tool` (DuckDuckGo) and `http_request` work |
+
+- **Finding, prompt cache on Claude:** claude-haiku-4.5 read 7% of its input from cache against 70% for
+  gpt-5.4-mini. zeroclaw's chat/completions requests carry no `cache_control`, so Anthropic models on
+  an aggregator cache little. The agentzero, aider and cline rows report the same for the same reason.
+
+- **llama-3.3-70b is not offered.** On OpenRouter it declined the first turn, a one-line echo, twice in
+  a row ("The provided functions are insufficient for me to complete this task", then "I cannot perform
+  this task as it requires additional information that is not provided"), with zeroclaw's tool list in
+  the request. It is in `_NOT_OFFERED["zeroclaw"]`, as it is on goose, hermes, jcode, kilo, mimo, nanobot,
+  opensquilla and pi.
+- **The family tour's two retests.** kimi-k2.7-code's first turn failed with zeroclaw's "The model
+  provider returned an invalid semantic completion": the provider returned no text and no tool call on
+  the stream and again on zeroclaw's non-streaming fallback. The turn failed with that reason rather
+  than completing empty. muse-glimmer-30b's first turn completed without rebuilding the deck. Both
+  passed on a retest in the same conversation.
+- **Three tools need a desktop and are not offered.** In the image, `browser_open` failed with "Failed
+  to open system browser", `browser` with "agent-browser CLI is unavailable" and `screenshot` with "No
+  screenshot tool found". They are in `_ZEROCLAW_NEVER` (rule 4).
+- **The instance's own MCP server is reached over loopback.** On nanobot, reaching it needed
+  `_BRIDGE_LOOPBACK_BACKENDS`. zeroclaw connected to `http://127.0.0.1:8080/v1/mcp/plugs` directly and
+  called `plugs__browser_navigate`. The browser column itself could not be judged on this instance: the
+  plug answered "The browser service is not set up on this deployment", and nanobot, run as a control,
+  failed the same way.
+
+### Not yet measured
+
+The expensive models of the catalog (Sonnet, Opus, Fable, the GPT sol and terra lines, Gemini Pro), the
+other providers (the direct Anthropic and OpenAI connections, Vercel, TokenRouter), the browser column
+on an instance with a browser service, the environments column and the benchmark dimension.

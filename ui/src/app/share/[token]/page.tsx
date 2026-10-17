@@ -10,6 +10,7 @@ import { useParams } from 'next/navigation';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { FileTypeIcon } from '@/components/FileTypeIcon';
+import { minutesAndSeconds } from '@/lib/duration';
 
 interface ShareMeta { session_id?: string; title?: string; status?: string; model?: string;
   backend?: string; harness_id?: string; harness_name?: string; event_count?: number; elapsed?: number; finished_at?: number }
@@ -19,7 +20,7 @@ interface ShareFile { path: string; bytes?: number; media_type?: string }
 
 function fmtDur(s?: number): string {
   if (!s) return '';
-  const m = Math.floor(s / 60), sec = Math.round(s % 60);
+  const [m, sec] = minutesAndSeconds(s);
   return m ? `${m}m ${String(sec).padStart(2, '0')}s` : `${sec}s`;
 }
 function fmtBytes(n?: number): string {
@@ -80,7 +81,7 @@ export default function SharePage() {
       <div className="page share-page" style={{ maxWidth: 860 }}>
         <div className="page-header">
           <div>
-            <p className="share-brand"><img src="/harnessrouter-logo.svg" alt="" width={20} height={20} /> Shared from <strong>HarnessRouter</strong></p>
+            <p className="share-brand"><img src="/brand/hr-mark-duo-light.svg" alt="" width={20} height={20} /> Shared from <strong>HarnessRouter</strong></p>
             <h1 style={{ fontSize: 24 }}>{meta?.title || 'Shared Task'}</h1>
             <div className="share-meta">
               {meta?.harness_name && <span className="share-tag"><iconify-icon icon="tabler:route"></iconify-icon>{meta.harness_name}</span>}

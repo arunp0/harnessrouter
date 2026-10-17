@@ -2,6 +2,277 @@
 
 All notable changes to the Unified Harness Protocol.
 
+## Conformance suite 2026.10.4.post11 (2026-10-15)
+
+No change to the protocol, the schema or any verdict a conformant server gets. ME-01 assumed the
+memory the suite creates is a root of the server's tree and asked its child for exactly one
+ancestor. A server whose memories are its own workspaces places a new memory inside the caller's,
+which the chapter allows, and would have failed for that alone. The child's ancestors are now
+expected to be the memory's own ancestors and then the memory, root first.
+
+## Conformance suite 2026.10.4.post9 (2026-10-06)
+
+No change to the protocol, the schema or any verdict a conformant server gets.
+
+A check that quotes the server's answer in its failure message could not read it. Eighteen messages,
+reached by eight of the nine Environments checks and all ten Memories checks (in the check itself or
+in a helper they share), were built from `r.text`, and a client result had `body`, `json` and
+`header()` but no `text`. A message is
+evaluated only when its assertion fails, so nothing showed against a conformant server. Against a
+server that really refused the call, the check raised `AttributeError`, the suite filed it as ERROR,
+"the check itself broke", and the server's own sentence about why it refused never reached the
+report: a real non-conformance read as a defect in the suite. A result now has `text`, the body
+decoded and never raising, and those checks FAIL with the status and the server's words. Reported
+and fixed by @Jiaqiiii523 (#411), with a test that reads the checks and refuses any attribute a
+result does not have; it now also follows an answer that comes back from a helper and one read
+straight off the call, which between them are a third of the answers the checks read.
+
+A report names the suite that produced it. `suite_version` was a second copy of the version and
+had not moved since `2026.9.12.post4`, so every report written by `2026.10.4` through
+`2026.10.4.post8` carried that older name. The version is now written once, in the package, and
+the build reads it from there. No report published under `reports/` was written in that window.
+
+## 2026-10-04 (patched the same day)
+
+Additive to `2026-09-28`: every request and object valid under the previous version is valid here.
+
+**Patch of 2026-10-04, same version.** A record's `content` is an ordered list of parts, always, on
+every read ([Memories §4.3](versions/2026-10-04/memories.md#43-content)). The chapter as first
+published that morning said `content` was text or one file reference, which could not hold a
+picture beside what it shows, or a conversation turn with a file in it. Two kinds of part are
+defined, `text` and `file`; a modality is a media type of a file part, not a kind of part, so a new
+one needs no change here, and any other kind is `x.`-prefixed and carried unchanged. A file part
+may carry the words that stand for it (`text`, with `text_source`), which is what recall by words
+finds; a part may carry the `role` that said it, so a turn is observed in this same shape. A string
+remains shorthand for one text part on a write. A file part's bytes are read at
+`GET /v1/memories/{id}/records/{rid}/content/{index}` (was `/content`). A provider's capability
+document says what it keeps in `content` (`media`, `bytes`, `describes`), replacing the `files`
+flag, and a write of a media type the provider does not keep is refused with `memory_unsupported`,
+never stored without its file. Schema: `MemoryContentPart`; `MemoryRecord.content` is an array.
+Suite `2026.10.4.post1`: ME-02 expects the list, ME-09 exercises parts, order, refusals, and a file
+part kept with its description and read back byte for byte, or refused, as the provider declares.
+No implementation had shipped against the morning's text.
+
+**Second patch of 2026-10-04, same version.** A memory's `id` is opaque. The schema had required
+the `hmem_` prefix, which a server whose memories are a tree it already keeps (its own workspaces,
+its own folders) could meet only with a second id space and a lookup between the two. `hmem_`
+remains the prefix of a server that mints its own ids. Schema: the pattern is gone from `Memory.id`,
+the path parameter and a harness's entry. Suite `2026.10.4.post2`: ME-01 no longer asserts the prefix.
+
+**Third patch of 2026-10-04, same version.** `recall` searches the memory **and everything below it
+the caller may read**; the morning's text had it act on one memory. A search is how a caller finds
+where something is kept, so each result now carries `memory` (`id`, `name`): the place to walk
+from. It never searches an ancestor. `depth` narrows it (`0` is the memory alone; it used to widen,
+from a default of one memory). A server MAY cap the memories one question covers and says so in
+`degraded`. `list`, `get`, `history` and the queries still act on one memory. The provider
+capability `recall.max_depth` is gone: the subtree is the server's to compose. Schema:
+`MemoryRecall.results[].memory` is required. Suite `2026.10.4.post3`: ME-03 rewritten.
+
+**Fourth patch of 2026-10-04, same version.** One vocabulary for who acts on a memory. A grant's
+principal was "an opaque typed identifier" whose kinds each server chose, and a record's
+`written_by` named its kinds only by example (`harness`, `consolidator`); two implementations had
+already stamped a person as `member` and as `user`. Now four kinds serve both places: `member`,
+`harness`, `group` (holds grants, never writes) and `provider` (writes, never holds a grant); a
+server's own kind is `x.`-prefixed. `consolidator` is gone: a consolidation's records are written
+by the `provider`, with `consolidation_id` beside it, and a record derived from an observation
+carries `on_behalf_of`. A credential is not a kind. Schema: `MemoryWriter`, and a pattern on a
+grant's `principal`. Suite `2026.10.4.post4`: ME-02 checks the writer's kind.
+
+**Fifth patch of 2026-10-04, same version.** A person and an agent are the same kind, and access
+has one mechanism. The fourth patch listed `member` (a person) and `harness` (an agent) as two
+kinds; they are one, `member`, and which of the two a member is, is its `type` (`human`, `agent`),
+a property no rule depends on. With that, a harness no longer carries a list of attached memories
+with an `access` that narrowed a grant: an agent reaches what it was granted, on the memory, as a
+person does. `/v1/harnesses/{id}/memories` reads the agent's principal and what it was granted, and
+sets two things: `default_memory_id` and `observe`. An agent joins a group only when someone adds
+it. Kinds are now `member`, `group` and, for a writer only, `provider`. Schema: `HarnessMemories`
+reshaped, `HarnessMemorySettings` added, `HarnessMemoryEntry` removed. Suite `2026.10.4.post5`.
+
+**Sixth patch of 2026-10-04, same version.** One graph. Entities and the relationships between
+them are not a second structure beside records: an entity is a record (new core type `entity`), a
+reference is an edge, and a relationship with something to say is a `fact` that references its
+`subject` and its `object`, so it has a writer, a time, a history and a source like any record.
+Five reference names are defined (`derived_from`, `part_of`, `about`, `subject`, `object`). One
+read, `POST /v1/memories/{id}/graph`, returns records as nodes and references as edges around a
+record or for a memory, the same for every provider; a provider declares where its entities come
+from in `graph.entities` (`derived`, `stated`, `none`). Also: an agent's membership of a group
+follows the rule a person's does (the fifth patch forbade a server to place an agent in a group on
+its own, which is not equal standing where every new person joins one). Schema: `MemoryGraph`,
+`MemoryGraphRequest`, `MemoryRecordRef`. Suite `2026.10.4.post6`: ME-10.
+
+The chapter's opening, §1, the list of an agent's tools (`memory_graph`) and §14 were then brought
+in line with the six patches above; no rule changed.
+
+**Seventh patch of 2026-10-04, same version.** A record MAY carry a `title`: one line that names
+it, apart from what it says (a document's heading, an entity's name, a fact's statement). It is
+optional, at most 300 characters, matched by a search together with the content, and revised like
+any other field. A record with a title MAY have empty content. An `entity`'s name is its title.
+Schema: `MemoryRecord.title`. Suite `2026.10.4.post7`: ME-02 checks that a title reads back apart
+from the content and may stand alone.
+
+The graph read without `around` starts from the records of the memory **and of what is below it**,
+the scope a search has; the sixth patch's text said the memory alone, which returned nothing for a
+memory whose records are all kept in its children.
+
+A record names at most one `subject` and at most one `object`; a second of either is refused with
+`memory_invalid` (422). Stated because two implementations had to agree on it: the reference
+gateway kept such a record and a graph engine refused it.
+
+Two things the first server built from this chapter by another team read differently from the
+reference gateway, both the chapter's fault, both now said once: `supersedes` is the NUMBER of the
+version a version replaced (the example showed a record id, and the schema allowed either); and a
+reference the reader may not follow is `{ record_id, available: false }` with no `memory_id` (the
+chapter returned the memory's id, which tells the reader that the memory exists).
+
+**Records that follow a source (§5.4), found by the second server.** A server that shows a
+document as one record per section cannot let a section be revised or forgotten through the memory:
+the next save of the document would undo it. The chapter had no word for that, so the server's
+refusal was undefined and a kept file was caught by the same refusal. Now: such a record carries
+`follows` (`kind`, `id`, `name` of its source), `revise` and `forget` on it are refused with
+`memory_unsupported` in words that say where the source is changed, and a client offers neither.
+A file someone kept is NOT such a record: its title and its line are its writer's statement, and
+it is revised and forgotten like any other; forgetting it takes the file out of reads, erasing it
+removes the bytes. Schema: `MemoryRecord.follows`, optional.
+
+**What a caller was given (`GET /v1/memories?granted=true`), found by the second server.** The
+listing without `parent` says where a caller enters the tree, and nothing said where below that it
+may do more. A server that ran an agent whose memories another server kept built the agent's tools
+from the entry listing, and an agent that read a memory and wrote one of its children was offered
+no tool to write with. `granted=true` lists every memory the caller may read whose parent it
+cannot see, and every memory below those on which what it may do differs from the parent, with
+its privileges on each. It is stated in what the caller may do, not in how access is kept, so a
+server that lets a member in by a role answers it as one that keeps a grant per memory does. §9
+names it as what an agent's tools are built from. Conformance: ME-01 asks it.
+
+**Facts that change (§4.4), standing records and observed conversations, found while preparing
+three public memory benchmarks for the second server.** A memory that keeps facts has to tell an update
+("I moved to Porto") from an addition ("I got a fourth bike") and from a disagreement ("I have
+never written a route", after describing one), keep the time something was said apart from the
+time it became true, and give an agent its standing instructions without being asked. The chapter
+had a word for none of these, so every writer and every server would have invented its own. Now:
+
+- A fact's attributes have defined keys: `predicate`, `value`, `holds` (`one` or `many`),
+  `stated_at`, `as_said`, `precision`, and `standing` (on any record). Without `time.valid_from`, a
+  fact became true when it was said. A server that declares `holds` places a `one` fact among the
+  others on its subject and predicate by their world time: what was true at T ends at T (a version
+  of the server's own, `on_behalf_of` the writer), a different value from the same instant is
+  linked with `contradicts` and both stay, and a fact about the past ends where the next value
+  began. The answer to the write says what it did, in `closed` and `conflicts`, never stored.
+- `contradicts` is a defined `rel`, kept on both records. A recall result on one side brings the
+  other, after the ranked results, with `score` null and `why` `["contradicts"]`, outside `limit`.
+- `GET /v1/memories/{id}/prime` reads a memory's standing records, newest first, within a token
+  budget, from that memory alone unless `depth` widens it; a server priming an agent reads each
+  memory it was granted at depth 0. The capability `prime` says whether a provider answers it.
+- An observed episode carries `time.valid_from`, a content part may carry `name` beside `role`, and
+  a conversation is observed one session to an episode, in order. A job says `queued`, `running`,
+  `completed` or `failed` (`pending` stays for a provider that cannot tell the first two apart),
+  with what it wrote, `closed`, `conflicts` and `usage`.
+- A revision no longer changes the world time of the version it replaces: that version gets only
+  its belief-time stamp, so `as_of` reads what the memory believed then. Stated because the second
+  server's store did otherwise; its existing histories needed no repair.
+
+Additive: every request and object valid before is valid now. Schema: `MemoryContentPart.name`, the
+episode's `time`, `MemoryJob` (`memory_id`, `closed`, `conflicts`, `usage`, times; `queued` and
+`running`), `MemoryRecord.closed` and `.conflicts` on a write's answer, `MemoryProvider.prime` and
+`.holds`, `MemoryPrime` and its path. Suite `2026.10.4.post10`: ME-11 (five facts on one subject:
+ended, linked, placed in the past, placed inside an earlier value), ME-12 (both sides of a
+disagreement from a recall of one), ME-13 (the prime read: only standing records, newest first, a
+budget, the memory alone).
+
+- **Memories** ([Memories](versions/2026-10-04/memories.md)), the Harness Memories sub-protocol,
+  optional at every class behind the `memories` capability. A memory is a named node in a tree:
+  it holds records and may have child memories. A grant gives a principal privileges (`read`,
+  `write`, `create`, `delete`) on a node and the node's descendants inherit it, up to a
+  `restricted` node; what a caller may not read is answered exactly as what does not exist.
+- Records are written two ways (`observe`: raw episodes, the provider decides what to derive, and
+  may answer `202` with a job; `remember`: one record as stated) and removed two ways (`forget`:
+  closed, trace kept; `erase`: content gone, with a list of what could not be reached). A change
+  appends a version; `history`, `as_of` and named snapshots read the past.
+- `recall` acts on one memory, by meaning, words and fields, and answers with the parent and
+  children the caller may read, so an agent walks the tree itself, up or down. What a provider did
+  not do is said in `degraded`; `abstain` says that nothing returned answers the question. Named
+  queries, and free queries where a provider offers them, run in the provider's own language,
+  confined to what the caller may read by a means the statement cannot undo.
+- A server keeps no memory of its own: records are kept by a **provider** the server is connected
+  to, behind one contract, and each provider says what it does in a capability document
+  (`GET /v1/memories/providers`): isolation, derivation, signals, history, erase, queries, types.
+- A harness is attached to memories at `PUT /v1/harnesses/{id}/memories`; attaching is granting.
+  A task names one more in `metadata.memory`. A session reaches memory at four moments: priming,
+  the agent's tools, observation after a turn, and consolidation, whose runs are visible, bounded
+  and reversible.
+- Extension record types carry their own schema and operations, for resources that are more than text.
+- New objects in the schema: `Memory`, `MemoryRecord`, `MemoryRecall`, `MemoryGrant`,
+  `MemoryProvider`, `MemoryConsolidation` and their requests; 23 paths under `/v1/memories` and
+  `/v1/harnesses/{id}/memories`. New error codes: `memory_not_found`, `memory_forbidden`,
+  `memory_record_not_found`, `memories_not_attached`, `memory_invalid`, `memory_unsupported`,
+  `memory_busy`, `memory_unavailable`.
+- Conformance suite `2026.10.4`: ME-01 to ME-08 drive the tree, records, recall and the provider's
+  capability document on a server that reports the capability and has a provider connected; a
+  server without the capability skips them. They pass, 8 of 8, on a build of the reference server
+  with a hosted memory service as the provider. The suite runs with one credential, so isolation
+  between principals is not yet checked by it.
+
+## 2026-09-28 (patched 2026-09-29)
+
+Additive to `2026-09-12`: every request and object valid under the previous version is valid here.
+
+**Patch of 2026-09-29, same version.** The task-side reference to an environment is
+`metadata.environment`, not a top-level request field: the task surface is a Responses request
+and `metadata` is its extension point, where `harness_id` already travels
+([Tasks §1.2](versions/2026-09-28/tasks.md#12-selecting-the-harness),
+[Environments §5](versions/2026-09-28/environments.md#5-attaching-an-environment)). The response
+reports `metadata.environment` beside `session_id`. The harness and session objects keep
+`environment` as an ordinary field. The published chapter had carried the field at the top level
+for one day; the schema, the conformance suite (`2026.9.28.post1`: EN-05 sends it in `metadata`,
+EN-07 asserts the response echo; `post2`: EN-02 compares the returned bytes, which `post1` could not
+read) and the reference server (0.26.7) changed together. The reference server passes the full
+class, 84 of 84, on `post2`.
+
+**Patch of 2026-09-29, second, same version.** A build's record says which step is running
+(`stage`) and carries its log while it runs, and a server MUST write it as steps end, so a client
+can show progress ([Environments §4](versions/2026-09-28/environments.md#4-builds-and-versions)).
+An optional `GET /v1/environments/packages/check` answers what the manager's registry says about a
+spec before any build (`EnvironmentPackageCheck`), so a client can refuse a typo where it is
+typed. The environment's `status` is `building` while a build runs, whichever version is active;
+a task keeps reading the active version meanwhile. Suite `2026.9.28.post3`: EN-09 exercises the
+check on a server that offers it; reference server 0.26.10.
+
+- **Environments** ([Environments](versions/2026-09-28/environments.md)), the Environments
+  sub-protocol, optional at every class behind the `environments` capability. An environment is a
+  project's files and installed dependencies, built once and mounted read-only at a fixed path in
+  every session that names it, beside the session's own writable working directory. The chapter
+  defines the object (`henv_`), files by path and whole-project import, builds and versions with
+  an active pointer and rollback, the `environment` field on the harness object and
+  `metadata.environment` on a task,
+  what a session sees (the mount, the variables, the instruction, the record), and the errors.
+- The session object carries `environment` ([Sessions §3](versions/2026-09-28/sessions.md#3-inspecting-a-session)).
+- New error codes: `environment_not_found`, `environment_not_ready`, `environment_busy`,
+  `environment_exists`, `environment_invalid`, `environment_unavailable`.
+- Conformance suite `2026.9.28`: checks EN-01 to EN-08 (EN-07 runs one task that reads the
+  environment and tries to write it), skipped on a server without the capability.
+
+## Conformance suite 2026.9.12.post4 (2026-09-27)
+
+- The public fixture answers at `https://uhp-fixture.harnessrouter.ai/mcp`, the suite's new default;
+  post3 pointed at the container's own address.
+
+## Conformance suite 2026.9.12.post3 (2026-09-27)
+
+The protocol is unchanged; the suite that measures it is.
+
+- The plugin checks point a plugin at a server that resolves and answers. A host may refuse an
+  MCP server it cannot reach at configuration time and record that in `skipped`; with the
+  unresolvable placeholder the checks used before, such a host failed P-02, P-04, P-06 and P-07
+  for refusing the placeholder rather than for anything about plugins (the hosted HarnessRouter,
+  2026-09-27). The suite ships the server (`uhp-conformance-fixture`, `pip install
+  "uhp-conformance[fixture]"`), defaults to a public copy of it, and takes `--plugin-mcp-url`
+  for a copy the host under test can reach.
+- **P-11**, new: a plugin's MCP server answers the agent's tool call. The agent is asked to call
+  the fixture's tool with a nonce and the fixture's answer, a function of the nonce, must come
+  back. It is the only plugin check that runs a task, and the only one that shows an agent
+  reaching a plugin's server rather than a server deriving and refusing correctly.
+- Measured implementations are re-measured under this suite before their badges are shown again.
+
 ## 2026-09-12
 
 Additive to `2026-08-11`: every request and object valid under the previous version is valid
